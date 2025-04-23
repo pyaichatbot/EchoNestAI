@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-50 text-secondary;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-bold text-secondary;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200;
+  }
+  .btn-primary {
+    @apply bg-primary text-white hover:bg-primary-dark;
+  }
+  .btn-secondary {
+    @apply bg-white border border-gray-300 text-secondary hover:bg-gray-50;
+  }
+  .btn-danger {
+    @apply bg-red-600 text-white hover:bg-red-700;
+  }
+  .input {
+    @apply w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent;
+  }
+  .card {
+    @apply bg-white rounded-lg shadow-md p-6;
+  }
+  .badge {
+    @apply px-2 py-1 text-xs rounded-full;
+  }
+  .badge-primary {
+    @apply bg-primary-light text-white;
+  }
+}
+
+/* Gradient background for special sections */
+.bg-gradient-primary {
+  background: linear-gradient(135deg, #1a5b9a 0%, #20b5c2 100%);
+}
+
+/* Animation for the logo sound waves */
+@keyframes soundWave {
+  0% {
+    opacity: 0.5;
+    transform: scale(0.95);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+  100% {
+    opacity: 0.5;
+    transform: scale(0.95);
+  }
+}

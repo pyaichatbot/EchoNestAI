@@ -1,0 +1,110 @@
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+
+class ChatBase(BaseModel):
+    input: str
+    child_id: Optional[str] = None
+    group_id: Optional[str] = None
+    document_scope: Optional[List[str]] = None
+    language: str = "en"
+    session_id: Optional[str] = None
+
+class ChatRequest(ChatBase):
+    pass
+
+class ChatResponse(BaseModel):
+    response: str
+    source_documents: List[str] = []
+    confidence: float
+    used_docs: int
+
+class ChatMessageBase(BaseModel):
+    session_id: str
+    is_user: bool = True
+    content: str
+    source_documents: Optional[str] = None
+    confidence: Optional[float] = None
+
+class ChatMessageCreate(ChatMessageBase):
+    pass
+
+class ChatMessageInDB(ChatMessageBase):
+    id: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class ChatMessage(ChatMessageInDB):
+    pass
+
+class ChatSessionBase(BaseModel):
+    child_id: Optional[str] = None
+    group_id: Optional[str] = None
+
+class ChatSessionCreate(ChatSessionBase):
+    pass
+
+class ChatSessionInDB(ChatSessionBase):
+    id: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class ChatSession(ChatSessionInDB):
+    messages: List[ChatMessage] = []
+
+class ChatFeedbackBase(BaseModel):
+    message_id: str
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    flagged: bool = False
+    flag_reason: Optional[str] = None
+
+class ChatFeedbackCreate(ChatFeedbackBase):
+    pass
+
+class ChatFeedbackInDB(ChatFeedbackBase):
+    id: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class ChatFeedback(ChatFeedbackInDB):
+    pass
+
+class FeedbackRequest(BaseModel):
+    input: str
+    response: str
+    child_id: Optional[str] = None
+    group_id: Optional[str] = None
+    rating: int
+    comment: Optional[str] = None
+
+class FlagRequest(BaseModel):
+    content_id: str
+    reason: str
+    flagged_by: str
+    notes: Optional[str] = None
+
+class StreamToken(BaseModel):
+    token: str
+    final: bool = False
+
+class SupportedLanguage(BaseModel):
+    code: str
+    name: str
+    supported_features: List[str]
+    voice_model: str
+    embedding_model: str
+
+class LanguageDetectionRequest(BaseModel):
+    text: str
+
+class LanguageDetectionResponse(BaseModel):
+    detected_language: str
+    confidence: float
+    supported: bool

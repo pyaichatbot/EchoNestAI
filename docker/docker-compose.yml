@@ -1,0 +1,132 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database for backend-online
+  postgres:
+    image: postgres:15-alpine
+    container_name: echonest-postgres
+    environment:
+      POSTGRES_USER: echonest
+      POSTGRES_PASSWORD: echonest_password
+      POSTGRES_DB: echonest
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U echonest"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Qdrant vector database for backend-online
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: echonest-qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Backend online server
+  backend-online:
+    build:
+      context: .
+      dockerfile: docker/backend-online.Dockerfile
+    container_name: echonest-backend-online
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://echonest:echonest_password@postgres:5432/echonest
+      QDRANT_URL: http://qdrant:6333
+      JWT_SECRET: your_jwt_secret_key_here
+      ENVIRONMENT: development
+      LOG_LEVEL: info
+      UPLOAD_FOLDER: /app/data/uploads
+      CONTENT_FOLDER: /app/data/content
+      MODELS_FOLDER: /app/data/models
+      FRONTEND_URL: http://localhost:3000
+      SMTP_HOST: smtp.example.com
+      SMTP_PORT: 587
+      SMTP_USERNAME: your_smtp_username
+      SMTP_PASSWORD: your_smtp_password
+      SMTP_SENDER: noreply@echonest.ai
+      SMTP_TLS: 'true'
+    volumes:
+      - backend_online_data:/app/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # Backend offline server
+  backend-offline:
+    build:
+      context: .
+      dockerfile: docker/backend-offline.Dockerfile
+    container_name: echonest-backend-offline
+    environment:
+      SQLITE_DB_PATH: /app/data/sqlite/echonest.db
+      JWT_SECRET: your_jwt_secret_key_here
+      ENVIRONMENT: development
+      LOG_LEVEL: info
+      UPLOAD_FOLDER: /app/data/uploads
+      CONTENT_FOLDER: /app/data/content
+      MODELS_FOLDER: /app/data/models
+    volumes:
+      - backend_offline_data:/app/data
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+  # Frontend application
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    container_name: echonest-frontend
+    depends_on:
+      - backend-online
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_OFFLINE_API_URL: http://localhost:8001
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  # Device client (for testing)
+  device-client:
+    build:
+      context: .
+      dockerfile: docker/device-client.Dockerfile
+    container_name: echonest-device-client
+    depends_on:
+      - backend-offline
+    environment:
+      DEVICE_ID: device_001
+      CHILD_ID: child_001
+      BACKEND_ONLINE_URL: http://backend-online:8000
+      BACKEND_OFFLINE_URL: http://backend-offline:8001
+      OFFLINE_MODE: 'false'
+    volumes:
+      - device_client_data:/app/data
+    ports:
+      - "8002:8002"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  backend_online_data:
+  backend_offline_data:
+  device_client_data:
