@@ -3,13 +3,13 @@ FROM node:20-alpine
 WORKDIR /app
 
 # Install dependencies
-COPY frontend/package.json frontend/package-lock.json ./
+COPY echo-nest-ai/package.json echo-nest-ai/package-lock.json ./
 
 # Install dependencies
 RUN npm ci
 
 # Copy application code
-COPY frontend/ .
+COPY echo-nest-ai/ .
 
 # Build the application
 RUN npm run build

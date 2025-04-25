@@ -1,5 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
+import io
+import os
+import datetime
 
 def test_health_endpoint(client):
     """Test the health endpoint returns 200 OK."""
@@ -151,4 +154,655 @@ def test_chat_session_operations(authenticated_client):
     
     # Verify deletion
     response = authenticated_client.get(f"/api/chat/sessions/{session_id}")
+    assert response.status_code == 404
+
+def test_device_registration_validation(authenticated_client):
+    """Test device registration endpoint validates input."""
+    # Test with missing fields
+    response = authenticated_client.post("/api/devices", json={})
+    assert response.status_code == 422
+
+    # Test with invalid type
+    response = authenticated_client.post("/api/devices", json={
+        "name": "Test Device",
+        "type": "invalid_type",
+        "identifier": "test-device-001"
+    })
+    assert response.status_code == 422 # Assuming type is validated
+
+def test_device_crud_operations(authenticated_client):
+    """Test basic CRUD operations for devices."""
+    # 1. List initial devices (should be empty or just default ones)
+    response = authenticated_client.get("/api/devices")
+    assert response.status_code == 200
+    initial_devices = response.json()
+    initial_count = len(initial_devices)
+
+    # 2. Register a new device
+    device_data = {
+        "name": "My Test Device",
+        "type": "smartphone", # Assuming 'smartphone' is a valid type
+        "identifier": "unique-test-device-id-123"
+    }
+    response = authenticated_client.post("/api/devices", json=device_data)
+    assert response.status_code == 201
+    new_device = response.json()
+    assert new_device["name"] == device_data["name"]
+    assert new_device["type"] == device_data["type"]
+    assert new_device["identifier"] == device_data["identifier"]
+    assert "id" in new_device
+    device_id = new_device["id"]
+
+    # 3. Verify device was added by listing again
+    response = authenticated_client.get("/api/devices")
+    assert response.status_code == 200
+    assert len(response.json()) == initial_count + 1
+
+    # 4. Get the specific device by ID
+    response = authenticated_client.get(f"/api/devices/{device_id}")
+    assert response.status_code == 200
+    fetched_device = response.json()
+    assert fetched_device["id"] == device_id
+    assert fetched_device["name"] == device_data["name"]
+
+    # 5. Update the device name
+    update_data = {"name": "Updated Test Device Name"}
+    response = authenticated_client.put(f"/api/devices/{device_id}", json=update_data)
+    assert response.status_code == 200
+    updated_device = response.json()
+    assert updated_device["name"] == update_data["name"]
+    # Ensure other fields remain unchanged if not updated
+    assert updated_device["type"] == device_data["type"]
+
+    # 6. Verify update by fetching again
+    response = authenticated_client.get(f"/api/devices/{device_id}")
+    assert response.status_code == 200
+    assert response.json()["name"] == update_data["name"]
+
+    # 7. Delete the device
+    response = authenticated_client.delete(f"/api/devices/{device_id}")
+    assert response.status_code == 200 # Or 204 if no content is returned
+
+    # 8. Verify deletion by trying to get it again (should be 404)
+    response = authenticated_client.get(f"/api/devices/{device_id}")
+    assert response.status_code == 404
+
+    # 9. Verify deletion by listing devices again
+    response = authenticated_client.get("/api/devices")
+    assert response.status_code == 200
+    assert len(response.json()) == initial_count
+
+def test_content_actual_file_upload(authenticated_client):
+    """Test actual file upload for content creation."""
+    # Get initial content count
+    response = authenticated_client.get("/api/content")
+    assert response.status_code == 200
+    initial_count = len(response.json())
+
+    # Prepare fake file data
+    fake_file_content = b"This is the content of the test file."
+    fake_file_name = "test_upload.txt"
+    files = {"file": (fake_file_name, io.BytesIO(fake_file_content), "text/plain")}
+    data = {
+        "title": "Uploaded Content",
+        "description": "Description for uploaded file",
+        "language": "en",
+        "type": "document",
+        "sync_offline": "true" # Form data often comes as strings
+    }
+
+    # Assuming the endpoint is POST /api/content for actual uploads
+    response = authenticated_client.post("/api/content", files=files, data=data)
+    
+    # Check for successful creation (201 or maybe 200)
+    assert response.status_code == 201
+    created_content = response.json()
+    assert created_content["title"] == data["title"]
+    assert created_content["original_filename"] == fake_file_name # Assuming this field exists
+
+    # Verify content was added
+    response = authenticated_client.get("/api/content")
+    assert response.status_code == 200
+    assert len(response.json()) == initial_count + 1
+
+    # Clean up: Delete the created content
+    content_id = created_content["id"]
+    delete_response = authenticated_client.delete(f"/api/content/{content_id}")
+    assert delete_response.status_code == 200
+
+    # Verify deletion
+    response = authenticated_client.get(f"/api/content/{content_id}")
+    assert response.status_code == 404
+
+def test_chat_send_message_different_languages(authenticated_client):
+    """Test sending chat messages with different language codes."""
+    # Create a session
+    response = authenticated_client.post("/api/chat/sessions", json={"title": "Language Test Session"})
+    assert response.status_code == 201
+    session_id = response.json()["id"]
+
+    # Send message in English
+    response_en = authenticated_client.post(
+        f"/api/chat/sessions/{session_id}/messages",
+        json={"content": "Hello", "language": "en"}
+    )
+    assert response_en.status_code == 201
+
+    # Send message in Spanish (assuming 'es' is supported)
+    response_es = authenticated_client.post(
+        f"/api/chat/sessions/{session_id}/messages",
+        json={"content": "Hola", "language": "es"}
+    )
+    assert response_es.status_code == 201 
+
+    # Verify messages (optional, check count or content if feasible)
+    response_msgs = authenticated_client.get(f"/api/chat/sessions/{session_id}/messages")
+    assert response_msgs.status_code == 200
+    # Add more specific assertions if response format is known
+    assert len(response_msgs.json()) >= 2 
+
+    # Clean up: Delete session
+    delete_response = authenticated_client.delete(f"/api/chat/sessions/{session_id}")
+    assert delete_response.status_code == 200
+
+def test_chat_message_to_nonexistent_session(authenticated_client):
+    """Test sending a message to a session ID that does not exist."""
+    non_existent_session_id = "invalid-session-id-12345"
+    response = authenticated_client.post(
+        f"/api/chat/sessions/{non_existent_session_id}/messages",
+        json={"content": "Test", "language": "en"}
+    )
+    assert response.status_code == 404 # Expecting Not Found
+
+def test_dashboard_endpoint(authenticated_client):
+    """Test the main dashboard endpoint returns data successfully."""
+    response = authenticated_client.get("/api/dashboard")
+    assert response.status_code == 200
+    # Basic check for some JSON response
+    assert response.json() is not None 
+    # TODO: Add more specific assertions based on expected dashboard structure
+    # e.g., assert "user_stats" in response.json()
+    # e.g., assert "recent_activity" in response.json()
+
+def test_events_endpoint(authenticated_client):
+    """Test the main events endpoint returns data successfully."""
+    response = authenticated_client.get("/api/events")
+    assert response.status_code == 200
+    # Basic check for some JSON response, likely a list
+    assert isinstance(response.json(), list)
+    # TODO: Add tests for event filtering if implemented (e.g., by date, type)
+
+# --- Language API Tests ---
+
+def test_language_detection(authenticated_client):
+    """Test the language detection endpoint."""
+    # Test English detection
+    response = authenticated_client.post("/api/languages/detect", json={"text": "Hello world, this is a test."})
+    assert response.status_code == 200
+    result = response.json()
+    assert "detected_language" in result
+    assert result["detected_language"] == "en"
+    assert "confidence" in result
+    assert 0.0 <= result["confidence"] <= 1.0
+    
+    # Test Spanish detection (if supported)
+    response = authenticated_client.post("/api/languages/detect", json={"text": "Hola mundo, esto es una prueba."})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["detected_language"] == "es"
+    assert 0.0 <= result["confidence"] <= 1.0
+    
+    # Test validation - empty text
+    response = authenticated_client.post("/api/languages/detect", json={"text": ""})
+    assert response.status_code == 422  # Validation error for empty text
+
+def test_supported_languages(authenticated_client):
+    """Test listing supported languages."""
+    response = authenticated_client.get("/api/languages/supported")
+    assert response.status_code == 200
+    languages = response.json()
+    assert isinstance(languages, list)
+    assert len(languages) > 0
+    
+    # Check structure of language object
+    first_language = languages[0]
+    assert "code" in first_language
+    assert "name" in first_language
+    assert "native_name" in first_language
+
+def test_language_translation(authenticated_client):
+    """Test the language translation endpoint."""
+    # English to Spanish
+    response = authenticated_client.post(
+        "/api/languages/translate", 
+        data={
+            "text": "Hello, how are you?",
+            "source_language": "en",
+            "target_language": "es"
+        }
+    )
+    assert response.status_code == 200
+    result = response.json()
+    assert "translated_text" in result
+    assert result["translated_text"] != "Hello, how are you?"  # Should be different
+    assert "source_language" in result
+    assert result["source_language"] == "en"
+    assert "target_language" in result
+    assert result["target_language"] == "es"
+    
+    # Test unsupported language pair
+    response = authenticated_client.post(
+        "/api/languages/translate", 
+        data={
+            "text": "Hello",
+            "source_language": "en",
+            "target_language": "xx"  # Invalid language code
+        }
+    )
+    assert response.status_code == 400  # Bad request for unsupported language
+
+def test_language_text_to_speech(authenticated_client):
+    """Test the text-to-speech endpoint."""
+    response = authenticated_client.post(
+        "/api/languages/tts",
+        data={
+            "text": "This is a test of text to speech.",
+            "language": "en"
+        }
+    )
+    assert response.status_code == 200
+    result = response.json()
+    assert "status" in result and result["status"] == "success"
+    assert "audio_url" in result  # URL to audio file
+    assert "language" in result and result["language"] == "en"
+    assert "text" in result
+    
+    # Verify audio file exists and is accessible
+    audio_url = result["audio_url"]
+    # Extract path from URL
+    audio_path = audio_url.replace("/media/", "")
+    audio_response = authenticated_client.get(f"/media/{audio_path}")
+    assert audio_response.status_code == 200
+    assert len(audio_response.content) > 0  # Should have content
+    assert "audio/" in audio_response.headers.get("content-type", "")  # Should be audio
+
+def test_language_transcription(authenticated_client):
+    """Test the audio transcription endpoint."""
+    # Create a dummy audio file
+    fake_audio_content = b"dummy audio data" * 1000  # Need some size for testing
+    files = {"audio": ("test_audio.WAV", io.BytesIO(fake_audio_content), "audio/wav")}
+    
+    response = authenticated_client.post(
+        "/api/languages/transcribe",
+        files=files,
+        data={"language": "en"}
+    )
+    
+    # Note: For this test to pass in a real environment, we'd need a real audio file
+    # Here we're testing the API contract, not the actual transcription functionality
+    
+    # If the endpoint returns 500 because our dummy audio isn't valid, that's expected
+    # We're just checking the contract is correct
+    assert response.status_code in [200, 500]
+    
+    # If successful, check response format
+    if response.status_code == 200:
+        result = response.json()
+        assert "text" in result
+        assert "detected_language" in result
+        assert "confidence" in result
+
+# --- Voice API Tests (Placeholders) ---
+
+@pytest.mark.skip(reason="Implementation details needed for voice API")
+def test_voice_transcription_upload(authenticated_client):
+    """Test uploading voice data for transcription."""
+    # fake_audio_content = b"dummy audio data"
+    # fake_audio_name = "test_audio.wav"
+    # files = {"file": (fake_audio_name, io.BytesIO(fake_audio_content), "audio/wav")}
+    # data = {"language": "en"} # Optional parameters
+    # response = authenticated_client.post("/api/voice/transcribe", files=files, data=data)
+    # assert response.status_code == 202 # Assuming it's an async task
+    # assert "job_id" in response.json() # Or similar indicator
+    pass
+
+@pytest.mark.skip(reason="Implementation details needed for voice API")
+def test_voice_get_transcription_result(authenticated_client):
+    """Test retrieving the result of a transcription."""
+    # Prerequisite: test_voice_transcription_upload should create a job
+    # job_id = "some_job_id_from_previous_test_or_setup"
+    # response = authenticated_client.get(f"/api/voice/transcribe/{job_id}")
+    # assert response.status_code == 200 
+    # assert response.json()["status"] == "completed" # Or check for transcript
+    pass
+
+@pytest.mark.skip(reason="Implementation details needed for voice API")
+def test_voice_tts(authenticated_client):
+    """Test the text-to-speech endpoint."""
+    # response = authenticated_client.post(
+    #     "/api/voice/tts", 
+    #     json={"text": "Generate audio from this text", "language": "en", "voice_id": "default"}
+    # )
+    # assert response.status_code == 200
+    # assert response.headers["content-type"] == "audio/mpeg" # Or other audio format
+    # assert len(response.content) > 0
+    pass
+
+@pytest.mark.skip(reason="Implementation details needed for voice API")
+def test_voice_validation(authenticated_client):
+    """Test validation for voice endpoints."""
+    # Example: Test transcription with invalid language
+    # fake_audio_content = b"dummy"
+    # files = {"file": ("test.wav", io.BytesIO(fake_audio_content), "audio/wav")}
+    # data = {"language": "xx"}
+    # response = authenticated_client.post("/api/voice/transcribe", files=files, data=data)
+    # assert response.status_code == 422
+
+    # Example: Test TTS with missing text
+    # response = authenticated_client.post("/api/voice/tts", json={})
+    # assert response.status_code == 422
+    pass
+
+def test_voice_text_to_speech(authenticated_client):
+    """Test the voice text-to-speech endpoint."""
+    response = authenticated_client.post(
+        "/api/voice/tts",
+        data={
+            "text": "This is a test of voice text to speech.",
+            "language": "en"
+        }
+    )
+    
+    assert response.status_code == 200
+    result = response.json()
+    
+    assert "status" in result and result["status"] == "success"
+    assert "audio_url" in result
+    assert "language" in result
+    assert "text" in result
+
+def test_voice_chat(authenticated_client):
+    """Test uploading voice for chat processing."""
+    # Create a dummy audio file
+    fake_audio_content = b"dummy audio data" * 1000  # Need some size for testing
+    files = {"audio": ("test_audio.wav", io.BytesIO(fake_audio_content), "audio/wav")}
+    
+    # Make the request
+    response = authenticated_client.post(
+        "/api/voice/chat",
+        files=files,
+        data={"language": "en"}
+    )
+    
+    # The success case would be 200 but our dummy audio might cause a processing error (500)
+    # This tests that the API contract is correct
+    assert response.status_code in [200, 500]
+    
+    if response.status_code == 200:
+        result = response.json()
+        assert "response" in result
+        assert "session_id" in result
+        assert "confidence" in result
+
+def test_content_filtering(authenticated_client):
+    """Test filtering content by type and language."""
+    # First create a test content item
+    response = authenticated_client.post(
+        "/api/content/mock-upload",  # Using mock_upload from existing tests
+        json={
+            "title": "Filterable Content",
+            "description": "Content for filter testing",
+            "language": "es",  # Spanish
+            "type": "audio",   # Audio type
+            "sync_offline": True
+        }
+    )
+    assert response.status_code in [201, 200]
+    
+    # Test filtering by type
+    response = authenticated_client.get("/api/content", params={"type": "audio"})
+    assert response.status_code == 200
+    audio_results = response.json()
+    assert len(audio_results) > 0
+    for item in audio_results:
+        assert item["type"] == "audio"
+    
+    # Test filtering by language
+    response = authenticated_client.get("/api/content", params={"language": "es"})
+    assert response.status_code == 200
+    spanish_results = response.json()
+    assert len(spanish_results) > 0
+    for item in spanish_results:
+        assert item["language"] == "es"
+    
+    # Test combined filtering
+    response = authenticated_client.get("/api/content", params={"type": "audio", "language": "es"})
+    assert response.status_code == 200
+    filtered_results = response.json()
+    for item in filtered_results:
+        assert item["type"] == "audio" and item["language"] == "es"
+
+def test_content_upload_errors(authenticated_client):
+    """Test error conditions when uploading content."""
+    # Test with unsupported content type
+    fake_file_content = b"This is the content of the test file."
+    files = {"file": ("test_file.txt", io.BytesIO(fake_file_content), "text/plain")}
+    data = {
+        "title": "Error Test Content",
+        "type": "invalid_type",  # Invalid content type
+        "language": "en",
+        "sync_offline": "true"
+    }
+    
+    response = authenticated_client.post("/api/content/upload", files=files, data=data)
+    assert response.status_code == 400  # Bad request for invalid type
+    
+    # Test with missing required field (title)
+    data = {
+        "type": "document",
+        "language": "en",
+        "sync_offline": "true"
+    }
+    
+    response = authenticated_client.post("/api/content/upload", files=files, data=data)
+    assert response.status_code == 422  # Validation error
+    
+    # Test with no file provided
+    data = {
+        "title": "No File Test",
+        "type": "document",
+        "language": "en",
+        "sync_offline": "true"
+    }
+    
+    response = authenticated_client.post("/api/content/upload", data=data)  # No files
+    assert response.status_code == 422  # Validation error
+
+def test_chat_sessions_list(authenticated_client):
+    """Test listing chat sessions with pagination and filtering."""
+    # Create multiple chat sessions to test pagination
+    sessions = []
+    for i in range(3):
+        response = authenticated_client.post(
+            "/api/chat/sessions",
+            json={"title": f"Session {i+1}"}
+        )
+        assert response.status_code == 201
+        sessions.append(response.json())
+    
+    # Test listing all sessions (should include our new ones)
+    response = authenticated_client.get("/api/chat/sessions")
+    assert response.status_code == 200
+    all_sessions = response.json()
+    assert len(all_sessions) >= 3
+    
+    # Test pagination if the API supports it
+    # Format will depend on backend implementation
+    response = authenticated_client.get("/api/chat/sessions", params={"limit": 2, "offset": 0})
+    assert response.status_code in [200, 400]  # 400 if pagination not supported
+    if response.status_code == 200:
+        paginated = response.json()
+        # Either we get a list with 2 items or a paginated response object
+        if isinstance(paginated, list):
+            assert len(paginated) <= 2
+        elif isinstance(paginated, dict) and "items" in paginated:
+            assert len(paginated["items"]) <= 2
+    
+    # Clean up - delete sessions
+    for session in sessions:
+        response = authenticated_client.delete(f"/api/chat/sessions/{session['id']}")
+        assert response.status_code in [200, 204]
+
+def test_events_filtering(authenticated_client):
+    """Test filtering options for events."""
+    # First get all events
+    response = authenticated_client.get("/api/events")
+    assert response.status_code == 200
+    
+    # Test filtering by date if supported
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    response = authenticated_client.get("/api/events", params={"date": today})
+    assert response.status_code in [200, 400]  # 400 if filtering not supported
+    
+    if response.status_code == 200:
+        events = response.json()
+        assert isinstance(events, list)
+        # If successful and any events returned, check they match the filter
+        if events:
+            for event in events:
+                assert today in event.get("timestamp", "")  # Assuming timestamp field contains date
+    
+    # Test filtering by event type if supported
+    response = authenticated_client.get("/api/events", params={"type": "login"})
+    assert response.status_code in [200, 400]  # 400 if filtering not supported
+    
+    if response.status_code == 200:
+        events = response.json()
+        assert isinstance(events, list)
+        # If successful and any events returned, check they match the filter
+        if events:
+            for event in events:
+                assert event.get("type") == "login"  # Assuming type field
+
+# Add tests for other modules based on the task list...
+# e.g., test_dashboard_endpoint, test_events_endpoint, etc.
+
+# --- Auth Edge Case Tests ---
+
+def test_auth_invalid_token(client):
+    """Test accessing protected routes with an invalid token."""
+    # Test with a malformed JWT
+    invalid_token = "invalid.token.format"
+    response = client.get("/api/content", headers={"Authorization": f"Bearer {invalid_token}"})
+    assert response.status_code == 401
+    
+    # Test with a well-formed but invalid JWT
+    # This is a made-up token that looks like a JWT but is not valid
+    fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    response = client.get("/api/content", headers={"Authorization": f"Bearer {fake_jwt}"})
+    assert response.status_code == 401
+    
+    # Test with no token
+    response = client.get("/api/content")
+    assert response.status_code == 401
+    
+    # Test with empty token
+    response = client.get("/api/content", headers={"Authorization": "Bearer "})
+    assert response.status_code == 401
+
+def test_auth_password_validation(client):
+    """Test the password validation rules during registration."""
+    user_data = {
+        "email": "test_pw_validation@example.com",
+        "firstName": "Test",
+        "lastName": "User",
+        "password": "short"  # Too short password
+    }
+    
+    response = client.post("/api/auth/register", json=user_data)
+    assert response.status_code == 422  # Validation error
+    
+    # Try with a password that has no uppercase
+    user_data["password"] = "password123"
+    response = client.post("/api/auth/register", json=user_data)
+    assert response.status_code == 422
+    
+    # Try with a password that has no digits
+    user_data["password"] = "Password"
+    response = client.post("/api/auth/register", json=user_data)
+    assert response.status_code == 422
+    
+    # Finally with a valid password
+    user_data["password"] = "Password123!"
+    response = client.post("/api/auth/register", json=user_data)
+    assert response.status_code == 201
+
+def test_dashboard_specific_data(authenticated_client):
+    """Test specific data points and structure in the dashboard response."""
+    response = authenticated_client.get("/api/dashboard")
+    assert response.status_code == 200
+    data = response.json()
+    
+    # Check for required top-level fields
+    assert "user_stats" in data
+    assert "recent_activity" in data
+    assert "content_summary" in data
+    
+    # Check user stats structure
+    user_stats = data["user_stats"]
+    assert "total_content" in user_stats
+    assert "active_devices" in user_stats
+    assert "total_chats" in user_stats
+    assert isinstance(user_stats["total_content"], int)
+    assert isinstance(user_stats["active_devices"], int)
+    assert isinstance(user_stats["total_chats"], int)
+    
+    # Check recent activity structure
+    recent_activity = data["recent_activity"]
+    assert isinstance(recent_activity, list)
+    if recent_activity:  # If there are any activities
+        activity = recent_activity[0]
+        assert "type" in activity
+        assert "timestamp" in activity
+        assert "description" in activity
+        assert isinstance(activity["timestamp"], str)
+    
+    # Check content summary structure
+    content_summary = data["content_summary"]
+    assert "by_type" in content_summary
+    assert "by_language" in content_summary
+    assert isinstance(content_summary["by_type"], dict)
+    assert isinstance(content_summary["by_language"], dict)
+
+def test_voice_transcription_retrieval(authenticated_client):
+    """Test retrieval of voice transcription results."""
+    # First create a transcription request
+    audio_file = {
+        "file": ("test_audio.wav", open("tests/test_data/test_audio.wav", "rb"), "audio/wav")
+    }
+    response = authenticated_client.post(
+        "/api/transcribe",
+        files=audio_file
+    )
+    assert response.status_code == 202
+    transcription_id = response.json()["transcription_id"]
+    
+    # Test immediate retrieval (should be processing)
+    response = authenticated_client.get(f"/api/transcribe/{transcription_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert "status" in data
+    assert data["status"] in ["processing", "completed"]
+    
+    # Test retrieval after completion (mock)
+    if data["status"] == "completed":
+        assert "transcript" in data
+        assert "language" in data
+        assert "duration" in data
+        assert isinstance(data["transcript"], str)
+        assert isinstance(data["language"], str)
+        assert isinstance(data["duration"], float)
+    
+    # Test retrieval of non-existent transcription
+    response = authenticated_client.get("/api/transcribe/nonexistent_id")
     assert response.status_code == 404

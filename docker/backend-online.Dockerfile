@@ -11,13 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
-COPY backend-server-refactored/requirements.txt .
+COPY backend-online/requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY backend-server-refactored/ .
+COPY backend-online/ .
 
 # Set environment variables
 ENV PYTHONPATH=/app
