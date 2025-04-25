@@ -4,8 +4,10 @@ from contextlib import asynccontextmanager
 import os
 from app.core.config import settings
 from app.core.logging import setup_logging
-from app.api.routes import auth, content, chat, feedback, devices, dashboard, events
 from app.db.database import init_db, close_db
+from app.api.api import api_router
+from app.middleware.rate_limit import auth_limiter, chat_limiter, default_limiter
+from app.middleware.error_handler import ErrorHandler, RequestValidator, RequestLogger
 
 logger = setup_logging("main")
 
@@ -27,38 +29,50 @@ async def lifespan(app: FastAPI):
 def create_application() -> FastAPI:
     application = FastAPI(
         title=settings.PROJECT_NAME,
-        openapi_url=f"{settings.API_V1_STR}/openapi.json",
+        version=settings.VERSION,
+        description=settings.DESCRIPTION,
         lifespan=lifespan,
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json"
     )
 
     # Set up CORS
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=settings.CORS_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Include API routes
-    application.include_router(auth.router, prefix=settings.API_V1_STR)
-    application.include_router(content.router, prefix=settings.API_V1_STR)
-    application.include_router(chat.router, prefix=settings.API_V1_STR)
-    application.include_router(feedback.router, prefix=settings.API_V1_STR)
-    application.include_router(devices.router, prefix=settings.API_V1_STR)
-    application.include_router(dashboard.router, prefix=settings.API_V1_STR)
-    application.include_router(events.router, prefix=settings.API_V1_STR)
+    # Add custom middlewares
+    application.middleware("http")(RequestLogger())
+    application.middleware("http")(RequestValidator())
+    application.middleware("http")(ErrorHandler())
+
+    # Add rate limiting for specific endpoints
+    application.middleware("http")(auth_limiter)
+    application.middleware("http")(chat_limiter)
+    application.middleware("http")(default_limiter)
+
+    # Include API router with versioning
+    application.include_router(api_router, prefix=settings.API_V1_STR)
+
+    # Add health check endpoint
+    @application.get("/health")
+    async def health_check():
+        """
+        Health check endpoint.
+        Returns:
+            dict: Status information including version
+        """
+        return {
+            "status": "healthy",
+            "version": settings.VERSION,
+            "environment": settings.ENVIRONMENT
+        }
 
     return application
 
 app = create_application()
-
-@app.get("/health")
-async def health_check():
-    """
-    Health check endpoint.
-    """
-    return {
-        "status": "healthy",
-        "version": "1.0.0"
-    }

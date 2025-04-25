@@ -1,23 +1,34 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks, Query, Request
 from typing import Any, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 import os
 import shutil
 from datetime import datetime
+from fastapi.responses import JSONResponse
 
 from app.db.database import get_db
 from app.db.schemas.content import (
     Content, ContentCreate, ContentUpdate, 
-    Child, Group, ContentAssignment
+    Child, Group, ContentAssignment,
+    RelevantDocumentsRequest, RelevantDocumentsResponse,
+    RelevantDocumentItem
 )
 from app.api.deps.auth import get_current_active_user
 from app.db.crud.content import (
     create_content, get_content, get_contents,
-    update_content, delete_content, assign_content
+    update_content, delete_content, assign_content,
+    validate_document_ids
 )
 from app.core.config import settings
 from app.services.content_processor import process_content_async
 from app.sse.event_manager import content_upload_manager
+from app.llm.chat_service import get_relevant_documents
+from app.services.language_service import is_language_supported
+from app.core.logging import setup_logging
+from app.core.cache import cache
+from app.core.rate_limiter import rate_limiter
+
+logger = setup_logging("content_routes")
 
 router = APIRouter(tags=["content"])
 
@@ -182,3 +193,89 @@ async def remove_content(
     
     await delete_content(db, id=id)
     return
+
+@router.post("/content/relevant-documents", response_model=RelevantDocumentsResponse)
+async def get_relevant_document_contexts(
+    request: RelevantDocumentsRequest,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+) -> RelevantDocumentsResponse:
+    """
+    Get relevant document contexts based on a search query.
+    
+    Args:
+        request: Search request containing query, optional document IDs, language, and limit
+        
+    Returns:
+        Relevant documents with their contexts and total count
+    
+    Raises:
+        HTTPException: If validation fails or other errors occur
+    """
+    try:
+        # Validate language code
+        if not await is_language_supported(request.language):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Language '{request.language}' is not supported"
+            )
+        
+        # Validate document IDs if provided
+        document_ids = request.document_ids
+        if document_ids:
+            valid_docs = await validate_document_ids(db, document_ids, current_user)
+            if not valid_docs:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No valid document IDs provided"
+                )
+            document_ids = valid_docs
+        
+        # Get relevant documents with caching
+        cache_key = f"relevant_docs:{request.query}:{request.language}:{document_ids}:{request.limit}"
+        cached_result = await cache.get_cache(cache_key)
+        
+        if cached_result:
+            return RelevantDocumentsResponse(**cached_result)
+        
+        # Get relevant documents
+        relevant_docs = await get_relevant_documents(
+            db=db,
+            query=request.query,
+            language=request.language,
+            document_ids=document_ids,
+            top_k=request.limit,
+            similarity_threshold=0.6  # Default threshold
+        )
+        
+        # Convert to response format
+        response = RelevantDocumentsResponse(
+            documents=[
+                RelevantDocumentItem(
+                    id=doc.document_id,
+                    title=doc.title,
+                    content=doc.context,
+                    relevance_score=doc.relevance_score,
+                    language=doc.language,
+                    type=doc.content_type
+                ) for doc in relevant_docs
+            ],
+            total_found=len(relevant_docs)
+        )
+        
+        # Cache the results
+        await cache.set_cache(cache_key, response.dict(), expire=300)  # Cache for 5 minutes
+        
+        return response
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Error retrieving relevant documents: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while processing your request"
+        )

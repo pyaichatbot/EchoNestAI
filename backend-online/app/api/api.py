@@ -1,15 +1,61 @@
 from fastapi import APIRouter
+from app.api.routes import auth, content, chat, devices, dashboard, events, language, voice, feedback
+from app.core.config import settings
 
-from app.api.routes import auth, content, chat, devices, dashboard, events, language, voice
-
+# Create versioned router
 api_router = APIRouter()
 
-# Include all route modules
-api_router.include_router(auth.router, prefix="/auth")
-api_router.include_router(content.router, prefix="/content")
-api_router.include_router(chat.router, prefix="/chat")
-api_router.include_router(devices.router, prefix="/devices")
-api_router.include_router(dashboard.router, prefix="/dashboard")
-api_router.include_router(events.router, prefix="/events")
-api_router.include_router(language.router, prefix="/languages")
-api_router.include_router(voice.router, prefix="/voice")
+# Include all route modules with proper prefixes and tags
+api_router.include_router(
+    auth.router,
+    prefix="/auth",
+    tags=["Authentication"]
+)
+
+api_router.include_router(
+    content.router,
+    prefix="/content",
+    tags=["Content Management"]
+)
+
+api_router.include_router(
+    chat.router,
+    prefix="/chat",
+    tags=["Chat"]
+)
+
+api_router.include_router(
+    devices.router,
+    prefix="/devices",
+    tags=["Device Management"]
+)
+
+api_router.include_router(
+    dashboard.router,
+    prefix="/dashboard",
+    tags=["Dashboard"]
+)
+
+api_router.include_router(
+    events.router,
+    prefix="/events",
+    tags=["Events"]
+)
+
+api_router.include_router(
+    language.router,
+    prefix="/languages",
+    tags=["Language Support"]
+)
+
+api_router.include_router(
+    voice.router,
+    prefix="/voice",
+    tags=["Voice Processing"]
+)
+
+api_router.include_router(
+    feedback.router,
+    prefix="/feedback",
+    tags=["Feedback"]
+)

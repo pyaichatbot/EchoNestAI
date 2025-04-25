@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.sse.event_manager import content_upload_manager
-from app.core.cache import cache
+from app.core.cache import cached
+from app.db.models.models import Content
+from sqlalchemy import select
 
 logger = setup_logging("content_processor")
 
@@ -166,7 +168,7 @@ async def process_document(
         logger.error(f"Error processing document {content_id}: {str(e)}")
         raise
 
-@cache(ttl=settings.CACHE_TTL)
+@cached(ttl=settings.CACHE_TTL)
 async def extract_text_from_pdf(file_path: str) -> str:
     """Extract text from PDF file."""
     try:
@@ -184,7 +186,7 @@ async def extract_text_from_pdf(file_path: str) -> str:
         logger.error(f"Error extracting text from PDF: {str(e)}")
         raise
 
-@cache(ttl=settings.CACHE_TTL)
+@cached(ttl=settings.CACHE_TTL)
 async def extract_text_from_docx(file_path: str) -> str:
     """Extract text from DOCX file."""
     try:
@@ -262,7 +264,7 @@ def split_text_into_chunks(text: str, chunk_size: int = 1000, overlap: int = 200
     
     return chunks
 
-@cache(ttl=settings.CACHE_TTL)
+@cached(ttl=settings.CACHE_TTL)
 async def generate_embeddings(chunks: List[str], language: str) -> List[np.ndarray]:
     """Generate embeddings for text chunks."""
     try:
@@ -679,7 +681,7 @@ async def save_upload_file(upload_file: UploadFile) -> str:
     
     return file_path
 
-@cache(ttl=settings.CACHE_TTL)
+@cached(ttl=settings.CACHE_TTL)
 async def search_content(
     db: AsyncSession, 
     query: str, 

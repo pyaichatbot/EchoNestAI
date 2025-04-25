@@ -6,22 +6,24 @@ import asyncio
 import os
 import tempfile
 import aiofiles
+import whisper
 
 from app.db.database import get_db
 from app.db.schemas.chat import (
-    VoiceChatRequest, ChatResponse, ChatSession, 
-    ChatMessage, ChatFeedback, SupportedLanguage
+    ChatResponse, ChatSession, ChatMessage, ChatFeedback,
+    SupportedLanguage, VoiceChatResponse
 )
 from app.api.deps.auth import get_current_active_user, get_device_auth
 from app.db.crud.chat import (
     create_chat_session, get_chat_session,
     create_chat_message, create_chat_feedback
 )
-from app.llm.chat_service import process_chat_query, stream_chat_response
+from app.llm.chat_service import process_chat_query, stream_chat_response, generate_embedding
 from app.sse.event_manager import chat_stream_manager
 from app.services.language_service import detect_language, get_supported_languages
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.services.document_retrieval import get_document_retriever
 
 logger = setup_logging("voice_routes")
 
@@ -37,7 +39,7 @@ async def voice_chat(
     document_scope: Optional[List[str]] = Form([]),
     current_user: Any = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
-) -> Any:
+) -> ChatResponse:
     """
     Process a voice chat query and return a text response.
     
@@ -57,9 +59,6 @@ async def voice_chat(
         temp_file.write(content)
     
     try:
-        # Process audio file
-        import whisper
-        
         # Ensure models directory exists
         os.makedirs(settings.MODELS_FOLDER, exist_ok=True)
         
@@ -330,37 +329,49 @@ async def save_streamed_response(
     Returns:
         Tuple of (source_documents, confidence)
     """
-    # Retrieve relevant documents for the query
-    from app.llm.chat_service import generate_embedding, retrieve_relevant_documents
-    
-    # Generate embedding for query
-    query_embedding = await generate_embedding(query, language)
-    
-    # Retrieve relevant documents
-    context_passages, source_documents = await retrieve_relevant_documents(
-        db, 
-        query_embedding, 
-        document_scope=document_scope,
-        top_k=3
-    )
-    
-    # Calculate confidence based on document relevance
-    if context_passages:
-        confidence = 0.85  # High confidence when documents are found
-    else:
-        confidence = 0.6   # Lower confidence when no documents are found
-    
-    # Save assistant message
-    await create_chat_message(
-        db,
-        session_id=session_id,
-        is_user=False,
-        content=response,
-        source_documents=source_documents,
-        confidence=confidence
-    )
-    
-    return source_documents, confidence
+    try:
+        # Generate embedding for query
+        query_embedding = await generate_embedding(query, language)
+        
+        # Get document retriever
+        retriever = await get_document_retriever()
+        
+        # Retrieve relevant documents
+        documents, _ = await retriever.retrieve_documents(
+            db=db,
+            query=query,
+            query_embedding=query_embedding,
+            language=language,
+            document_ids=document_scope,
+            limit=3,
+            min_score=0.6
+        )
+        
+        # Extract source document IDs
+        source_documents = [doc["id"] for doc in documents]
+        
+        # Calculate confidence based on document relevance
+        if documents:
+            # Use average relevance score for confidence
+            confidence = sum(doc["relevance_score"] for doc in documents) / len(documents)
+        else:
+            confidence = 0.6  # Default confidence when no documents found
+        
+        # Save assistant message
+        await create_chat_message(
+            db,
+            session_id=session_id,
+            is_user=False,
+            content=response,
+            source_documents=source_documents,
+            confidence=confidence
+        )
+        
+        return source_documents, confidence
+        
+    except Exception as e:
+        logger.error(f"Error saving streamed response: {str(e)}", exc_info=True)
+        return [], 0.6  # Return default values on error
 
 @router.post("/voice/tts")
 async def text_to_speech_endpoint(
@@ -390,39 +401,33 @@ async def text_to_speech_endpoint(
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=audio_output_folder) as temp_file:
             output_path = temp_file.name
         
-        # Get appropriate TTS model for language
-        from app.services.language_service import get_language_model
-        language_models = get_language_model(language)
+        # Use gTTS for speech synthesis
+        from gtts import gTTS
+        import io
+        from pydub import AudioSegment
         
-        # Use pyttsx3 for basic TTS
-        import pyttsx3
+        # Map language codes to gTTS supported codes
+        language_map = {
+            "en": "en",
+            "hi": "hi",
+            "te": "te",
+            "ta": "ta",
+            "de": "de",
+            # Add more mappings as needed
+        }
         
-        engine = pyttsx3.init()
+        # Get supported language code or fallback to English
+        tts_lang = language_map.get(language, "en")
         
-        # Set voice properties
-        voices = engine.getProperty('voices')
+        # Generate speech to memory buffer first
+        mp3_fp = io.BytesIO()
+        tts = gTTS(text=text, lang=tts_lang, slow=False)
+        await asyncio.to_thread(tts.write_to_fp, mp3_fp)
+        mp3_fp.seek(0)
         
-        # Select voice based on language
-        if language == "en":
-            engine.setProperty('voice', voices[0].id)  # English voice
-        elif language in ["hi", "te", "ta"]:
-            # Try to find an Indian voice, fallback to default
-            indian_voice = next((v for v in voices if "indian" in v.name.lower()), None)
-            if indian_voice:
-                engine.setProperty('voice', indian_voice.id)
-        elif language == "de":
-            # Try to find a German voice, fallback to default
-            german_voice = next((v for v in voices if "german" in v.name.lower()), None)
-            if german_voice:
-                engine.setProperty('voice', german_voice.id)
-        
-        # Set other properties
-        engine.setProperty('rate', 150)  # Speed of speech
-        engine.setProperty('volume', 0.9)  # Volume (0.0 to 1.0)
-        
-        # Generate speech
-        engine.save_to_file(text, output_path)
-        engine.runAndWait()
+        # Convert to WAV using pydub
+        audio = await asyncio.to_thread(AudioSegment.from_mp3, mp3_fp)
+        await asyncio.to_thread(audio.export, output_path, format="wav")
         
         logger.info(f"Generated speech for text in {language}: {text[:50]}...")
         

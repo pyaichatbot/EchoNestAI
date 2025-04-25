@@ -60,12 +60,22 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - echo-nest-ai-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
 
   # Qdrant vector database for backend-online
   qdrant:

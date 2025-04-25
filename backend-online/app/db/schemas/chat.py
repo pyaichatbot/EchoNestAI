@@ -13,6 +13,13 @@ class ChatBase(BaseModel):
 class ChatRequest(ChatBase):
     pass
 
+class VoiceChatRequest(ChatBase):
+    """Request schema for voice chat interactions"""
+    audio_format: str = Field(default="wav", description="Audio format of the input file")
+    sample_rate: int = Field(default=16000, description="Sample rate of the audio in Hz")
+    voice_id: Optional[str] = Field(default=None, description="Optional voice ID for response synthesis")
+    return_audio: bool = Field(default=True, description="Whether to return synthesized audio response")
+
 class ChatResponse(BaseModel):
     response: str
     source_documents: List[str] = []

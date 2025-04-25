@@ -12,6 +12,8 @@ from app.services.language_service import get_language_model, is_language_suppor
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.models.models import Content, ContentEmbedding
+from app.db.schemas.content import RelevantDocument
+from app.services.document_retrieval import get_document_retriever
 
 logger = setup_logging("chat_service")
 
@@ -60,15 +62,25 @@ async def process_chat_query(
     # Generate embeddings for the query
     query_embedding = await generate_embedding(query, language)
     
+    # Get document retriever
+    retriever = await get_document_retriever()
+    
     # Retrieve relevant documents
-    context_passages, source_documents = await retrieve_relevant_documents(
-        db, 
-        query_embedding, 
-        document_scope=document_scope,
-        child_id=child_id,
-        group_id=group_id,
-        top_k=3
+    documents, total = await retriever.retrieve_documents(
+        db=db,
+        query=query,
+        query_embedding=query_embedding,
+        language=language,
+        document_ids=document_scope,
+        user_id=child_id,
+        group_ids=[group_id] if group_id else None,
+        limit=3,
+        min_score=0.6
     )
+    
+    # Extract context passages and source IDs
+    context_passages = [doc["content"] for doc in documents]
+    source_documents = [doc["id"] for doc in documents]
     
     # Generate response with context using reflection settings from config
     response, confidence = await generate_llm_response(
@@ -396,130 +408,115 @@ async def stream_chat_response(
     child_id: Optional[str] = None,
     group_id: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
-    """
-    Stream a chat response token by token with RAG support.
-    
-    Args:
-        db: Database session for retrieving context
-        query: User query
-        session_id: Chat session ID
-        language: Language code
-        enable_reflection: Whether to enable reflection mechanism
-        reflection_threshold: Confidence threshold below which reflection is triggered
-        document_scope: Optional list of document IDs to search within
-        child_id: Optional child ID for filtering documents
-        group_id: Optional group ID for filtering documents
-        
-    Yields:
-        Response tokens one by one
-    """
+    """Stream chat response with RAG"""
     try:
-        # Validate language
-        if not is_language_supported(language):
-            language = "en"
+        # Get chat history
+        chat_history = await get_chat_history(db, session_id, limit=5)
         
-        # Get appropriate model for language
+        # Generate query embedding
+        query_embedding = await generate_embedding(query, language)
+        
+        # Get document retriever
+        retriever = await get_document_retriever()
+        
+        # Retrieve relevant documents
+        documents, _ = await retriever.retrieve_documents(
+            db=db,
+            query=query,
+            query_embedding=query_embedding,
+            language=language,
+            document_ids=document_scope,
+            user_id=child_id,
+            group_ids=[group_id] if group_id else None,
+            limit=3,
+            min_score=0.6
+        )
+        
+        # Extract context passages
+        context_passages = [doc["content"] for doc in documents]
+        
+        # Get language models
         language_models = get_language_model(language)
         model_name = language_models["llm_model"]
         
         # Load model and tokenizer
         model, tokenizer = await load_model_and_tokenizer(model_name)
         
-        # Get chat history and relevant documents
-        chat_history = await get_chat_history(db, session_id, limit=5)
-        query_embedding = await generate_embedding(query, language)
-        context_passages, _ = await retrieve_relevant_documents(
-            db,
-            query_embedding,
-            document_scope=document_scope,
-            child_id=child_id,
-            group_id=group_id
+        # Create streaming pipeline
+        generator = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            max_length=512,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9
         )
         
         # Prepare context and prompt
-        context = "\n\n".join(context_passages)
-        history_text = "\n".join(
-            f"{msg['role']}: {msg['content']}" for msg in chat_history
-        )
-        
+        context = "\n\n".join(context_passages) if context_passages else ""
         prompt = format_rag_prompt(language, context, query)
+        
+        # Add chat history if available
+        history_text = ""
+        for msg in chat_history:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            history_text += f"{role}: {msg['content']}\n"
+        
         if history_text:
             prompt = f"Chat history:\n{history_text}\n\n{prompt}"
         
-        # Set up generation parameters
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
-        gen_kwargs = {
-            "input_ids": input_ids,
-            "max_length": 512,
-            "do_sample": True,
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "pad_token_id": tokenizer.eos_token_id
-        }
-        
-        # Generate and stream response
-        initial_response = []
-        
-        # If reflection is enabled, collect all tokens first
-        if enable_reflection:
-            for output in model.generate(**gen_kwargs, streamer=True):
-                token = tokenizer.decode(output[-1], skip_special_tokens=True)
-                if token:
-                    initial_response.append(token)
+        # Generate response tokens
+        for output in generator(prompt, return_full_text=False, streaming=True):
+            yield output[0]["generated_text"]
             
-            # Get complete response
-            complete_response = "".join(initial_response)
-            
-            # Calculate confidence score
-            inputs = tokenizer(complete_response, return_tensors="pt").to(model.device)
-            with torch.no_grad():
-                outputs = model(**inputs, labels=inputs["input_ids"])
-            
-            perplexity = torch.exp(outputs.loss).item()
-            confidence = max(0, min(1, 1.0 - (perplexity / 100)))
-            
-            # If confidence is low, get improved response
-            if confidence < reflection_threshold:
-                logger.info(f"Low confidence ({confidence:.2f}), triggering reflection")
-                
-                reflection_prompt = format_reflection_prompt(
-                    language=language,
-                    question=query,
-                    response=complete_response,
-                    context=context
-                )
-                
-                reflection_input_ids = tokenizer(reflection_prompt, return_tensors="pt").input_ids.to(model.device)
-                reflection_kwargs = {**gen_kwargs, "input_ids": reflection_input_ids}
-                
-                reflection_result = []
-                for output in model.generate(**reflection_kwargs, streamer=True):
-                    token = tokenizer.decode(output[-1], skip_special_tokens=True)
-                    if token:
-                        reflection_result.append(token)
-                
-                reflection_text = "".join(reflection_result)
-                if "improved response" in reflection_text.lower():
-                    improved_response = reflection_text.split("improved response:", 1)[-1].strip()
-                    if improved_response:
-                        for token in improved_response:
-                            yield token
-                        return
-                
-                logger.info(f"Reflection output: {reflection_text}")
-            
-            # If no improvement needed or no improvement suggested, yield original response
-            for token in complete_response:
-                yield token
-            
-        # If reflection is disabled, stream tokens immediately
-        else:
-            for output in model.generate(**gen_kwargs, streamer=True):
-                token = tokenizer.decode(output[-1], skip_special_tokens=True)
-                if token:
-                    yield token
-    
     except Exception as e:
-        logger.error(f"Error streaming response: {str(e)}")
-        error_msg = get_prompt("error", language)
-        yield error_msg
+        logger.error(f"Error in streaming response: {str(e)}", exc_info=True)
+        yield f"Error: {str(e)}"
+
+async def get_relevant_documents(
+    db: AsyncSession,
+    query: str,
+    language: str = "en",
+    document_ids: Optional[List[str]] = None,
+    top_k: int = 5,
+    similarity_threshold: float = 0.6
+) -> List[RelevantDocument]:
+    """Get relevant documents for a query"""
+    try:
+        # Generate query embedding
+        query_embedding = await generate_embedding(query, language)
+        
+        # Get document retriever
+        retriever = await get_document_retriever()
+        
+        # Retrieve documents
+        documents, _ = await retriever.retrieve_documents(
+            db=db,
+            query=query,
+            query_embedding=query_embedding,
+            language=language,
+            document_ids=document_ids,
+            limit=top_k,
+            min_score=similarity_threshold
+        )
+        
+        # Convert to RelevantDocument schema
+        relevant_docs = []
+        for doc in documents:
+            relevant_doc = RelevantDocument(
+                id=doc["id"],
+                title=doc["title"],
+                content=doc["content"],
+                relevance_score=doc["relevance_score"],
+                language=doc["language"],
+                type=doc["type"],
+                metadata=doc["metadata"]
+            )
+            relevant_docs.append(relevant_doc)
+        
+        return relevant_docs
+        
+    except Exception as e:
+        logger.error(f"Error getting relevant documents: {str(e)}", exc_info=True)
+        return []

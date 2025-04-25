@@ -306,3 +306,40 @@ async def remove_content_assignment(
     logger.info(f"Removed {removed_count} content assignments: content {content_id} from {target_type} {target_id}")
     
     return removed_count > 0
+
+async def validate_document_ids(
+    db: AsyncSession,
+    document_ids: List[str],
+    user: Any
+) -> List[str]:
+    """
+    Validate document IDs and check user access permissions
+    
+    Args:
+        db: Database session
+        document_ids: List of document IDs to validate
+        user: Current user object
+        
+    Returns:
+        List of valid document IDs the user has access to
+    """
+    # Query for documents and their assignments
+    query = select(Content.id).where(
+        Content.id.in_(document_ids)
+    )
+    
+    # If user is not admin, check assignments
+    if not user.is_superuser:
+        query = query.join(
+            ContentAssignment,
+            ContentAssignment.content_id == Content.id
+        ).where(
+            # User has direct access or access through group
+            (ContentAssignment.child_id.in_(user.children_ids)) |
+            (ContentAssignment.group_id.in_(user.group_ids))
+        )
+    
+    result = await db.execute(query)
+    valid_ids = result.scalars().all()
+    
+    return list(valid_ids)

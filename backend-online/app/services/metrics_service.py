@@ -15,7 +15,7 @@ from app.db.schemas.dashboard import (
     NotificationSettings, NotificationSettingsUpdate
 )
 from app.core.logging import setup_logging
-from app.core.cache import cache
+from app.core.cache import cached
 from app.core.metrics import metrics_client
 
 logger = setup_logging("metrics_service")
@@ -106,7 +106,7 @@ async def _fetch_hours_metrics(
         logger.error(f"Database error in _fetch_hours_metrics: {str(e)}")
         raise MetricsError("Failed to fetch hours metrics") from e
 
-@cache(ttl=CACHE_TTL)
+@cached(ttl=CACHE_TTL)
 async def get_child_metrics(
     db: AsyncSession,
     child_id: str,
