@@ -1,16 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-
+import os
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.api.routes import auth, content, chat, feedback, devices, dashboard, events
 from app.db.database import init_db, close_db
 
-logger = setup_logging()
+logger = setup_logging("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Create necessary directories
+    os.makedirs(settings.UPLOAD_FOLDER, exist_ok=True)
+    os.makedirs(settings.CONTENT_FOLDER, exist_ok=True)
+    os.makedirs(settings.MODELS_FOLDER, exist_ok=True)
+    
     # Startup: Initialize connections and resources
     logger.info("Starting up EchoNest AI Backend Server")
     await init_db()
@@ -29,7 +34,7 @@ def create_application() -> FastAPI:
     # Set up CORS
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
+        allow_origins=["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -47,3 +52,13 @@ def create_application() -> FastAPI:
     return application
 
 app = create_application()
+
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint.
+    """
+    return {
+        "status": "healthy",
+        "version": "1.0.0"
+    }

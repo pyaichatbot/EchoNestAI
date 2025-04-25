@@ -17,7 +17,7 @@ from app.db.crud.chat import (
     create_chat_message, create_chat_feedback
 )
 from app.llm.chat_service import process_chat_query
-from app.sse.chat_events import chat_stream_manager
+from app.sse.event_manager import chat_stream_manager
 from app.services.language_service import detect_language, get_supported_languages
 
 router = APIRouter(tags=["chat"])

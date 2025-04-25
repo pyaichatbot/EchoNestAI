@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 import json
 import os
@@ -7,12 +7,16 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 from app.db.schemas.chat import ChatRequest, ChatResponse
+from app.llm.language_prompts import format_rag_prompt, format_reflection_prompt, get_prompt
 from app.services.language_service import get_language_model, is_language_supported
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.models.models import Content, ContentEmbedding
 
 logger = setup_logging("chat_service")
+
+# Cache for loaded models to prevent reloading
+_model_cache = {}
 
 async def process_chat_query(
     db: AsyncSession,
@@ -26,12 +30,17 @@ async def process_chat_query(
     """
     Process a chat query using RAG (Retrieval Augmented Generation).
     
-    Steps:
-    1. Validate language support
-    2. Get appropriate language models
-    3. Generate embeddings for the query
-    4. Retrieve relevant documents
-    5. Generate response with context
+    Args:
+        db: Database session
+        query: User query
+        session_id: Chat session ID
+        child_id: Optional child ID for filtering
+        group_id: Optional group ID for filtering
+        document_scope: Optional list of document IDs to search within
+        language: Language code
+        
+    Returns:
+        ChatResponse object containing the generated response and metadata
     """
     # Validate language
     if not is_language_supported(language):
@@ -40,9 +49,10 @@ async def process_chat_query(
     # Get language models
     language_models = get_language_model(language)
     
-    # Log the query
+    # Log the query and reflection settings
     logger.info(f"Processing chat query in {language}: {query}")
     logger.info(f"Using models: {language_models}")
+    logger.info(f"Reflection enabled: {settings.ENABLE_REFLECTION}, threshold: {settings.REFLECTION_THRESHOLD}")
     
     # Get chat history for context
     chat_history = await get_chat_history(db, session_id, limit=5)
@@ -60,12 +70,14 @@ async def process_chat_query(
         top_k=3
     )
     
-    # Generate response with context
+    # Generate response with context using reflection settings from config
     response, confidence = await generate_llm_response(
         query=query,
         context_passages=context_passages,
         chat_history=chat_history,
-        language=language
+        language=language,
+        reflection_threshold=settings.REFLECTION_THRESHOLD,
+        enable_reflection=settings.ENABLE_REFLECTION
     )
     
     return ChatResponse(
@@ -131,7 +143,7 @@ async def generate_embedding(text: str, language: str) -> np.ndarray:
     # Import embedding model
     from sentence_transformers import SentenceTransformer
     
-    # Load model (with caching)
+    # Load model
     model_path = os.path.join(settings.MODELS_FOLDER, model_name)
     if os.path.exists(model_path):
         model = SentenceTransformer(model_path)
@@ -193,7 +205,6 @@ async def retrieve_relevant_documents(
     
     # Calculate similarity scores
     search_results = []
-    
     for emb in embeddings:
         # Parse embedding vector from JSON
         vector = np.array(json.loads(emb.embedding_vector))
@@ -231,29 +242,19 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-async def generate_llm_response(
-    query: str,
-    context_passages: List[str],
-    chat_history: List[Dict[str, Any]],
-    language: str
-) -> Tuple[str, float]:
+async def load_model_and_tokenizer(model_name: str) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     """
-    Generate a response using a language model.
+    Load and cache model and tokenizer.
     
     Args:
-        query: User query
-        context_passages: Relevant passages from content search
-        chat_history: Chat history for context
-        language: Language code
+        model_name: Name of the model to load
         
     Returns:
-        Generated response and confidence score
+        Tuple of (model, tokenizer)
     """
-    # Get appropriate model for language
-    language_models = get_language_model(language)
-    model_name = language_models["llm_model"]
+    if model_name in _model_cache:
+        return _model_cache[model_name]
     
-    # Load model and tokenizer
     model_path = os.path.join(settings.MODELS_FOLDER, model_name)
     
     if os.path.exists(model_path):
@@ -280,6 +281,38 @@ async def generate_llm_response(
         tokenizer.save_pretrained(model_path)
         model.save_pretrained(model_path)
     
+    _model_cache[model_name] = (model, tokenizer)
+    return model, tokenizer
+
+async def generate_llm_response(
+    query: str,
+    context_passages: List[str],
+    chat_history: List[Dict[str, Any]],
+    language: str,
+    reflection_threshold: float = settings.REFLECTION_THRESHOLD,
+    enable_reflection: bool = settings.ENABLE_REFLECTION
+) -> Tuple[str, float]:
+    """
+    Generate a response using a language model with optional reflection.
+    
+    Args:
+        query: User query
+        context_passages: Relevant passages from content search
+        chat_history: Chat history for context
+        language: Language code
+        reflection_threshold: Confidence threshold below which reflection is triggered
+        enable_reflection: Whether to enable reflection mechanism
+        
+    Returns:
+        Generated response and confidence score
+    """
+    # Get appropriate model for language
+    language_models = get_language_model(language)
+    model_name = language_models["llm_model"]
+    
+    # Load model and tokenizer
+    model, tokenizer = await load_model_and_tokenizer(model_name)
+    
     # Create text generation pipeline
     generator = pipeline(
         "text-generation",
@@ -301,20 +334,18 @@ async def generate_llm_response(
         history_text += f"{role}: {msg['content']}\n"
     
     # Get RAG prompt template for language
-    from app.services.language_service import format_rag_prompt
     prompt = format_rag_prompt(language, context, query)
     
     # Add chat history if available
     if history_text:
         prompt = f"Chat history:\n{history_text}\n\n{prompt}"
     
-    # Generate response
+    # Generate initial response
     try:
-        result = generator(prompt, return_full_text=False)[0]["generated_text"]
+        initial_result = generator(prompt, return_full_text=False)[0]["generated_text"]
         
         # Calculate confidence score based on perplexity
-        # Lower perplexity = higher confidence
-        inputs = tokenizer(result, return_tensors="pt").to(model.device)
+        inputs = tokenizer(initial_result, return_tensors="pt").to(model.device)
         with torch.no_grad():
             outputs = model(**inputs, labels=inputs["input_ids"])
         
@@ -322,96 +353,173 @@ async def generate_llm_response(
         perplexity = torch.exp(outputs.loss).item()
         confidence = max(0, min(1, 1.0 - (perplexity / 100)))
         
-        return result, confidence
+        # Check if reflection is needed
+        if enable_reflection and confidence < reflection_threshold:
+            logger.info(f"Low confidence ({confidence:.2f}), triggering reflection")
+            
+            # Get reflection prompt
+            reflection_prompt = format_reflection_prompt(
+                language=language,
+                question=query,
+                response=initial_result,
+                context=context
+            )
+            
+            # Generate reflection
+            reflection_result = generator(reflection_prompt, return_full_text=False)[0]["generated_text"]
+            
+            # If reflection suggests improvements, use the improved response
+            if "improved response" in reflection_result.lower():
+                # Extract improved response from reflection
+                improved_response = reflection_result.split("improved response:", 1)[-1].strip()
+                if improved_response:
+                    logger.info("Using improved response from reflection")
+                    return improved_response, confidence
+            
+            # Log reflection for analysis
+            logger.info(f"Reflection output: {reflection_result}")
+        
+        return initial_result, confidence
     except Exception as e:
         logger.error(f"Error generating response: {str(e)}")
-        
-        # Get error message in appropriate language
-        from app.services.language_service import get_prompt
         error_msg = get_prompt("error", language)
-        
         return error_msg, 0.0
 
 async def stream_chat_response(
+    db: AsyncSession,
     query: str,
     session_id: str,
-    language: str = "en"
-) -> List[str]:
+    language: str = "en",
+    enable_reflection: bool = settings.ENABLE_REFLECTION,
+    reflection_threshold: float = settings.REFLECTION_THRESHOLD,
+    document_scope: Optional[List[str]] = None,
+    child_id: Optional[str] = None,
+    group_id: Optional[str] = None
+) -> AsyncGenerator[str, None]:
     """
-    Stream a chat response token by token.
+    Stream a chat response token by token with RAG support.
     
     Args:
+        db: Database session for retrieving context
         query: User query
         session_id: Chat session ID
         language: Language code
+        enable_reflection: Whether to enable reflection mechanism
+        reflection_threshold: Confidence threshold below which reflection is triggered
+        document_scope: Optional list of document IDs to search within
+        child_id: Optional child ID for filtering documents
+        group_id: Optional group ID for filtering documents
         
-    Returns:
-        List of response tokens
+    Yields:
+        Response tokens one by one
     """
-    # Validate language
-    if not is_language_supported(language):
-        language = "en"  # Default to English if unsupported
-    
-    # Get appropriate model for language
-    language_models = get_language_model(language)
-    model_name = language_models["llm_model"]
-    
-    # Load model and tokenizer
-    model_path = os.path.join(settings.MODELS_FOLDER, model_name)
-    
-    if os.path.exists(model_path):
-        # Load from local path if available
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            device_map="auto"
-        )
-    else:
-        # Download model if not available locally
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            device_map="auto"
-        )
-    
-    # Create simple prompt
-    prompt = f"User: {query}\nAssistant: "
-    
-    # Tokenize prompt
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
-    
-    # Generate response token by token
-    tokens = []
-    
-    # Set up generation parameters
-    gen_kwargs = {
-        "input_ids": input_ids,
-        "max_length": 512,
-        "do_sample": True,
-        "temperature": 0.7,
-        "top_p": 0.9,
-        "pad_token_id": tokenizer.eos_token_id
-    }
-    
     try:
-        # Stream tokens
-        for output in model.generate(**gen_kwargs, streamer=True):
-            # Decode token
-            token = tokenizer.decode(output[-1], skip_special_tokens=True)
-            if token:
-                tokens.append(token)
+        # Validate language
+        if not is_language_supported(language):
+            language = "en"
+        
+        # Get appropriate model for language
+        language_models = get_language_model(language)
+        model_name = language_models["llm_model"]
+        
+        # Load model and tokenizer
+        model, tokenizer = await load_model_and_tokenizer(model_name)
+        
+        # Get chat history and relevant documents
+        chat_history = await get_chat_history(db, session_id, limit=5)
+        query_embedding = await generate_embedding(query, language)
+        context_passages, _ = await retrieve_relevant_documents(
+            db,
+            query_embedding,
+            document_scope=document_scope,
+            child_id=child_id,
+            group_id=group_id
+        )
+        
+        # Prepare context and prompt
+        context = "\n\n".join(context_passages)
+        history_text = "\n".join(
+            f"{msg['role']}: {msg['content']}" for msg in chat_history
+        )
+        
+        prompt = format_rag_prompt(language, context, query)
+        if history_text:
+            prompt = f"Chat history:\n{history_text}\n\n{prompt}"
+        
+        # Set up generation parameters
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
+        gen_kwargs = {
+            "input_ids": input_ids,
+            "max_length": 512,
+            "do_sample": True,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "pad_token_id": tokenizer.eos_token_id
+        }
+        
+        # Generate and stream response
+        initial_response = []
+        
+        # If reflection is enabled, collect all tokens first
+        if enable_reflection:
+            for output in model.generate(**gen_kwargs, streamer=True):
+                token = tokenizer.decode(output[-1], skip_special_tokens=True)
+                if token:
+                    initial_response.append(token)
+            
+            # Get complete response
+            complete_response = "".join(initial_response)
+            
+            # Calculate confidence score
+            inputs = tokenizer(complete_response, return_tensors="pt").to(model.device)
+            with torch.no_grad():
+                outputs = model(**inputs, labels=inputs["input_ids"])
+            
+            perplexity = torch.exp(outputs.loss).item()
+            confidence = max(0, min(1, 1.0 - (perplexity / 100)))
+            
+            # If confidence is low, get improved response
+            if confidence < reflection_threshold:
+                logger.info(f"Low confidence ({confidence:.2f}), triggering reflection")
+                
+                reflection_prompt = format_reflection_prompt(
+                    language=language,
+                    question=query,
+                    response=complete_response,
+                    context=context
+                )
+                
+                reflection_input_ids = tokenizer(reflection_prompt, return_tensors="pt").input_ids.to(model.device)
+                reflection_kwargs = {**gen_kwargs, "input_ids": reflection_input_ids}
+                
+                reflection_result = []
+                for output in model.generate(**reflection_kwargs, streamer=True):
+                    token = tokenizer.decode(output[-1], skip_special_tokens=True)
+                    if token:
+                        reflection_result.append(token)
+                
+                reflection_text = "".join(reflection_result)
+                if "improved response" in reflection_text.lower():
+                    improved_response = reflection_text.split("improved response:", 1)[-1].strip()
+                    if improved_response:
+                        for token in improved_response:
+                            yield token
+                        return
+                
+                logger.info(f"Reflection output: {reflection_text}")
+            
+            # If no improvement needed or no improvement suggested, yield original response
+            for token in complete_response:
                 yield token
+            
+        # If reflection is disabled, stream tokens immediately
+        else:
+            for output in model.generate(**gen_kwargs, streamer=True):
+                token = tokenizer.decode(output[-1], skip_special_tokens=True)
+                if token:
+                    yield token
+    
     except Exception as e:
         logger.error(f"Error streaming response: {str(e)}")
-        
-        # Get error message in appropriate language
-        from app.services.language_service import get_prompt
         error_msg = get_prompt("error", language)
-        
         yield error_msg
-    
-    return tokens

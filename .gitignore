@@ -55,3 +55,4 @@ yarn-error.log*
 .venv/*
 .venv
 frontend-old/*
+backend-old/venv

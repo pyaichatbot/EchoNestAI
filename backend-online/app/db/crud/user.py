@@ -2,8 +2,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import update, delete
 from typing import Any, Dict, Optional, List, Union
+import datetime
+from datetime import datetime, timedelta
 
-from app.db.models.models import User, UserRole
+from app.db.models.models import User, UserRole, EmailVerificationToken, PasswordResetToken, generate_uuid
 from app.db.schemas.user import UserCreate, UserUpdate
 from app.core.security import get_password_hash, verify_password
 
@@ -128,3 +130,100 @@ async def delete_user(db: AsyncSession, id: str) -> bool:
     await db.execute(stmt)
     await db.commit()
     return True
+
+async def verify_email_token(db: AsyncSession, token: str) -> Optional[str]:
+    """
+    Verify an email verification token and return the user ID if valid.
+    """
+    from sqlalchemy import and_
+    
+    result = await db.execute(
+        select(EmailVerificationToken)
+        .filter(
+            and_(
+                EmailVerificationToken.token == token,
+                EmailVerificationToken.expires_at > datetime.datetime.utcnow()
+            )
+        )
+    )
+    token_obj = result.scalars().first()
+    
+    if not token_obj:
+        return None
+    
+    return token_obj.user_id
+
+async def mark_email_verified(db: AsyncSession, user_id: str) -> Optional[User]:
+    """
+    Mark a user's email as verified.
+    """
+    user = await get_user(db, id=user_id)
+    if not user:
+        return None
+    
+    stmt = (
+        update(User)
+        .where(User.id == user_id)
+        .values(is_verified=True)
+    )
+    await db.execute(stmt)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+async def create_password_reset_token(db: AsyncSession, user_id: str, expires_hours: int = 24) -> Optional[str]:
+    """Create a new password reset token for the user."""
+    # Delete any existing tokens for this user
+    stmt = delete(PasswordResetToken).where(PasswordResetToken.user_id == user_id)
+    await db.execute(stmt)
+    
+    # Create new token
+    token = PasswordResetToken(
+        user_id=user_id,
+        token=generate_uuid(),
+        expires_at=datetime.utcnow() + timedelta(hours=expires_hours)
+    )
+    await db.add(token)
+    await db.commit()
+    await db.refresh(token)
+    return token.token
+
+async def verify_password_reset_token(db: AsyncSession, token: str) -> Optional[str]:
+    """
+    Verify a password reset token and return the user ID if valid.
+    """
+    from sqlalchemy import and_
+    result = await db.execute(
+        select(PasswordResetToken)
+        .filter(
+            and_(
+                PasswordResetToken.token == token,
+                PasswordResetToken.expires_at > datetime.utcnow(),
+                PasswordResetToken.used == False
+            )
+        )
+    )
+    token_obj = result.scalars().first()
+    
+    if not token_obj:
+        return None
+    
+    return token_obj.user_id
+
+async def update_user_password(db: AsyncSession, user_id: str, hashed_password: str) -> Optional[User]:
+    """
+    Update a user's password.
+    """
+    user = await get_user(db, id=user_id)
+    if not user:
+        return None
+    
+    stmt = (
+        update(User)
+        .where(User.id == user_id)
+        .values(hashed_password=hashed_password)
+    )
+    await db.execute(stmt)
+    await db.commit()
+    await db.refresh(user)
+    return user

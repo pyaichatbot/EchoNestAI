@@ -2,7 +2,7 @@ from typing import Dict, List, Any, Optional
 import json
 from fastapi import APIRouter
 
-from app.api.routes import auth, content, chat, devices, language, voice
+from app.api.routes import auth, content, chat, devices, language, voice, feedback
 
 api_router = APIRouter()
 
@@ -13,3 +13,4 @@ api_router.include_router(chat.router, prefix="/chat")
 api_router.include_router(devices.router, prefix="/devices")
 api_router.include_router(language.router, prefix="/languages")
 api_router.include_router(voice.router, prefix="/voice")
+api_router.include_router(feedback.router, prefix="/feedback")

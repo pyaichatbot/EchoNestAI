@@ -3,7 +3,9 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
+from typing import Dict, Any
 
 from app.db.database import Base
 
@@ -33,7 +35,15 @@ class User(Base):
     # Relationships
     children = relationship("Child", back_populates="parent")
     groups = relationship("Group", back_populates="teacher")
-    
+    password_reset_tokens = relationship("PasswordResetToken", back_populates="user", cascade="all, delete-orphan")
+    email_verification_tokens = relationship("EmailVerificationToken", back_populates="user", cascade="all, delete-orphan")
+    notification_settings = relationship(
+        "NotificationSetting", 
+        back_populates="user", 
+        uselist=False,  # One-to-one relationship
+        cascade="all, delete-orphan"
+    )
+
 class Child(Base):
     __tablename__ = "children"
     
@@ -208,3 +218,109 @@ class OTAUpdate(Base):
     release_notes = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class EmailVerificationToken(Base):
+    __tablename__ = "email_verification_tokens"
+    
+    id = Column(String, primary_key=True, default=generate_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    token = Column(String, unique=True, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    user = relationship("User")
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    
+    id = Column(String, primary_key=True, default=generate_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    token = Column(String, unique=True, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    user = relationship("User", back_populates="password_reset_tokens")
+
+class NotificationSetting(Base):
+    __tablename__ = "notification_settings"
+    
+    id = Column(String, primary_key=True, default=generate_uuid)
+    user_id = Column(String, ForeignKey("users.id"), unique=True, nullable=False)
+    email_on_upload_complete = Column(Boolean, default=True)
+    email_on_flags = Column(Boolean, default=True)
+    sms_alerts = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    user = relationship("User", back_populates="notification_settings")
+
+class EventType(str, enum.Enum):
+    UPLOAD_COMPLETE = "upload_complete"
+    SYNC_FAILED = "sync_failed"
+    FLAGGED_RESPONSE = "flagged_response"
+
+class Event(Base):
+    __tablename__ = "events"
+    
+    id = Column(String, primary_key=True, default=generate_uuid)
+    event_type = Column(Enum(EventType), nullable=False)
+    target_id = Column(String, nullable=False)
+    user_role = Column(Enum(UserRole), nullable=False)
+    event_meta = Column(Text, nullable=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+    def __init__(self, **kwargs):
+        if "event_meta" in kwargs:
+            meta = kwargs["event_meta"]
+            if isinstance(meta, dict):
+                kwargs["event_meta"] = json.dumps(meta)
+            elif isinstance(meta, str):
+                try:
+                    # Validate that the string is valid JSON
+                    json.loads(meta)
+                    kwargs["event_meta"] = meta
+                except json.JSONDecodeError:
+                    raise ValueError("event_meta must be a valid JSON string or dictionary")
+            else:
+                raise ValueError("event_meta must be a dictionary or valid JSON string")
+        super().__init__(**kwargs)
+
+    @property
+    def meta_dict(self) -> Dict[str, Any]:
+        """
+        Returns the event metadata as a dictionary.
+        If event_meta is None or empty, returns an empty dict.
+        Raises ValueError if event_meta is not valid JSON.
+        """
+        if not self.event_meta:
+            return {}
+        try:
+            return json.loads(self.event_meta)
+        except json.JSONDecodeError:
+            raise ValueError("Invalid JSON in event_meta")
+
+    def update_meta(self, new_meta: Dict[str, Any]) -> None:
+        """
+        Updates the event metadata with new values.
+        Merges with existing metadata if present.
+        
+        Args:
+            new_meta: Dictionary containing new metadata values
+        """
+        current_meta = self.meta_dict
+        current_meta.update(new_meta)
+        self.event_meta = json.dumps(current_meta)
+
+    def set_meta(self, meta: Dict[str, Any]) -> None:
+        """
+        Sets the event metadata, replacing any existing metadata.
+        
+        Args:
+            meta: Dictionary containing metadata values
+        """
+        self.event_meta = json.dumps(meta)
+

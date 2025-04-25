@@ -17,7 +17,7 @@ from app.db.crud.content import (
 )
 from app.core.config import settings
 from app.services.content_processor import process_content_async
-from app.sse.content_events import content_upload_manager
+from app.sse.event_manager import content_upload_manager
 
 router = APIRouter(tags=["content"])
 
@@ -169,7 +169,7 @@ async def remove_content(
     id: str,
     current_user: Any = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
-) -> Any:
+) -> None:
     """
     Delete content.
     """
@@ -181,4 +181,4 @@ async def remove_content(
         )
     
     await delete_content(db, id=id)
-    return {"status": "success"}
+    return

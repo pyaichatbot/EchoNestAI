@@ -35,7 +35,7 @@ class InterceptHandler(logging.Handler):
         )
 
 
-def setup_logging():
+def setup_logging(name: str):
     """Configure logging with loguru"""
     logging_settings = LoggingSettings()
     
@@ -55,8 +55,10 @@ def setup_logging():
     logging.basicConfig(handlers=[InterceptHandler()], level=0)
     
     # Intercept uvicorn logging
-    for _log in ["uvicorn", "uvicorn.error", "fastapi"]:
+    """ for _log in ["uvicorn", "uvicorn.error", "fastapi"]:
         _logger = logging.getLogger(_log)
-        _logger.handlers = [InterceptHandler()]
+        _logger.handlers = [InterceptHandler()] """
+    _logger = logging.getLogger(name)
+    _logger.handlers = [InterceptHandler()]
 
     return logger

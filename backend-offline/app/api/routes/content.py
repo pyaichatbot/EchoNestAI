@@ -76,6 +76,7 @@ async def create_new_content(
     # Create upload directory if it doesn't exist
     os.makedirs(settings.UPLOAD_FOLDER, exist_ok=True)
     os.makedirs(settings.CONTENT_FOLDER, exist_ok=True)
+    os.makedirs(settings.MODELS_FOLDER, exist_ok=True)
     
     # Generate unique filename
     file_extension = os.path.splitext(file.filename)[1]

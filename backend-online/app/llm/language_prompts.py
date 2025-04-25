@@ -141,6 +141,89 @@ Antwort:""",
 उत्तर:"""
 }
 
+# Reflection prompt templates for different languages
+REFLECTION_PROMPT_TEMPLATES = {
+    "en": """Please evaluate your previous response based on the following criteria:
+
+Original Question: {question}
+Your Response: {response}
+Context Provided: {context}
+
+1. Accuracy: Is the response factually accurate according to the provided context?
+2. Completeness: Does the response fully address all aspects of the question?
+3. Relevance: Is the response directly relevant to the question asked?
+4. Clarity: Is the response clear and well-structured?
+5. Source Usage: Does the response effectively use the provided context?
+
+If you identify any issues, please provide an improved response that addresses these concerns.
+
+Reflection:""",
+    
+    "te": """దయచేసి క్రింది ప్రమాణాల ఆధారంగా మీ మునుపటి ప్రతిస్పందనను మూల్యాంకనం చేయండి:
+
+అసలు ప్రశ్న: {question}
+మీ ప్రతిస్పందన: {response}
+అందించిన సందర్భం: {context}
+
+1. ఖచ్చితత్వం: అందించిన సందర్భం ప్రకారం ప్రతిస్పందన వాస్తవికంగా ఖచ్చితమైనదా?
+2. పూర్తి: ప్రతిస్పందన ప్రశ్న యొక్క అన్ని అంశాలను పూర్తిగా పరిష్కరిస్తుందా?
+3. సంబంధితత: ప్రతిస్పందన అడిగిన ప్రశ్నకు నేరుగా సంబంధం కలిగి ఉందా?
+4. స్పష్టత: ప్రతిస్పందన స్పష్టంగా మరియు బాగా నిర్మించబడి ఉందా?
+5. మూల వినియోగం: ప్రతిస్పందన అందించిన సందర్భాన్ని ప్రభావవంతంగా ఉపయోగిస్తుందా?
+
+మీరు ఏవైనా సమస్యలను గుర్తించినట్లయితే, దయచేసి ఈ ఆందోళనలను పరిష్కరించే మెరుగైన ప్రతిస్పందనను అందించండి.
+
+ప్రతిబింబం:""",
+    
+    "ta": """பின்வரும் அளவுகோல்களின் அடிப்படையில் உங்கள் முந்தைய பதிலை மதிப்பிடவும்:
+
+அசல் கேள்வி: {question}
+உங்கள் பதில்: {response}
+வழங்கப்பட்ட சூழல்: {context}
+
+1. துல்லியம்: வழங்கப்பட்ட சூழலின்படி பதில் உண்மையில் துல்லியமானதா?
+2. முழுமை: பதில் கேள்வியின் அனைத்து அம்சங்களையும் முழுமையாக நிவர்த்தி செய்கிறதா?
+3. தொடர்பு: பதில் கேட்கப்பட்ட கேள்விக்கு நேரடியாக தொடர்புடையதா?
+4. தெளிவு: பதில் தெளிவாகவும் நன்கு கட்டமைக்கப்பட்டதாகவும் உள்ளதா?
+5. மூல பயன்பாடு: பதில் வழங்கப்பட்ட சூழலை திறம்பட பயன்படுத்துகிறதா?
+
+நீங்கள் ஏதேனும் சிக்கல்களை அடையாளம் கண்டால், இந்த கவலைகளை நிவர்த்தி செய்யும் மேம்பட்ட பதிலை வழங்கவும்.
+
+பிரதிபலிப்பு:""",
+    
+    "de": """Bitte bewerten Sie Ihre vorherige Antwort anhand der folgenden Kriterien:
+
+Ursprüngliche Frage: {question}
+Ihre Antwort: {response}
+Bereitgestellter Kontext: {context}
+
+1. Genauigkeit: Ist die Antwort gemäß dem bereitgestellten Kontext sachlich korrekt?
+2. Vollständigkeit: Behandelt die Antwort alle Aspekte der Frage vollständig?
+3. Relevanz: Ist die Antwort direkt relevant für die gestellte Frage?
+4. Klarheit: Ist die Antwort klar und gut strukturiert?
+5. Quellennutzung: Nutzt die Antwort den bereitgestellten Kontext effektiv?
+
+Wenn Sie Probleme erkennen, geben Sie bitte eine verbesserte Antwort, die diese Bedenken berücksichtigt.
+
+Reflexion:""",
+    
+    "hi": """कृपया निम्नलिखित मानदंडों के आधार पर अपनी पिछली प्रतिक्रिया का मूल्यांकन करें:
+
+मूल प्रश्न: {question}
+आपकी प्रतिक्रिया: {response}
+प्रदान किया गया संदर्भ: {context}
+
+1. सटीकता: क्या प्रतिक्रिया दिए गए संदर्भ के अनुसार तथ्यात्मक रूप से सटीक है?
+2. पूर्णता: क्या प्रतिक्रिया प्रश्न के सभी पहलुओं को पूरी तरह से संबोधित करती है?
+3. प्रासंगिकता: क्या प्रतिक्रिया पूछे गए प्रश्न के लिए सीधे प्रासंगिक है?
+4. स्पष्टता: क्या प्रतिक्रिया स्पष्ट और सुव्यवस्थित है?
+5. स्रोत उपयोग: क्या प्रतिक्रिया प्रदान किए गए संदर्भ का प्रभावी ढंग से उपयोग करती है?
+
+यदि आप कोई समस्या पहचानते हैं, तो कृपया एक बेहतर प्रतिक्रिया प्रदान करें जो इन चिंताओं को दूर करती हो।
+
+प्रतिबिंब:"""
+}
+
 # Default to English if language not supported
 DEFAULT_LANGUAGE = "en"
 
@@ -205,6 +288,37 @@ def format_rag_prompt(language: str, context: str, question: str) -> str:
     """
     template = get_rag_prompt_template(language)
     return template.format(context=context, question=question)
+
+def get_reflection_prompt_template(language: str) -> str:
+    """
+    Get the reflection prompt template for the specified language.
+    
+    Args:
+        language: Language code
+        
+    Returns:
+        Reflection prompt template
+    """
+    if not is_language_supported(language):
+        language = DEFAULT_LANGUAGE
+    
+    return REFLECTION_PROMPT_TEMPLATES.get(language, REFLECTION_PROMPT_TEMPLATES[DEFAULT_LANGUAGE])
+
+def format_reflection_prompt(language: str, question: str, response: str, context: str) -> str:
+    """
+    Format a reflection prompt with question, response and context.
+    
+    Args:
+        language: Language code
+        question: Original question
+        response: Generated response
+        context: Context used for generation
+        
+    Returns:
+        Formatted reflection prompt
+    """
+    template = get_reflection_prompt_template(language)
+    return template.format(question=question, response=response, context=context)
 
 def load_language_resources() -> Dict[str, Dict[str, Any]]:
     """

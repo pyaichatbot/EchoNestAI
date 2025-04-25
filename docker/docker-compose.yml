@@ -3,18 +3,65 @@ version: '3.8'
 services:
   # PostgreSQL database for backend-online
   postgres:
-    image: postgres:15-alpine
-    container_name: echonest-postgres
-    environment:
-      POSTGRES_USER: echonest
-      POSTGRES_PASSWORD: echonest_password
-      POSTGRES_DB: echonest
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+    image: postgres:14
     ports:
       - "5432:5432"
+    container_name: echonest-postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=echonest
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - echo-nest-ai-network
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U echonest"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+
+  # Database initialization service
+  db-init:
+    build:
+      context: ../backend-online
+      dockerfile: ../docker/backend-online.Dockerfile
+    container_name: echonest-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/echonest
+      CORS_ORIGINS: "*"
+    networks:
+      - echo-nest-ai-network
+    command: >
+      sh -c "echo 'Waiting for database to be ready...' &&
+             sleep 10 &&
+             echo 'Running database migrations...' &&
+             alembic upgrade head &&
+             echo 'Database initialization complete!'"
+    restart: "no"
+
+  # Redis cache
+  redis:
+    image: redis:7-alpine
+    container_name: echonest-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -29,34 +76,51 @@ services:
     ports:
       - "6333:6333"
       - "6334:6334"
+    networks:
+      - echo-nest-ai-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 10s
-      timeout: 5s
+      interval: 30s
+      timeout: 10s
       retries: 5
+      start_period: 30s
     restart: unless-stopped
 
   # Backend online server
   backend-online:
     build:
-      context: .
-      dockerfile: docker/backend-online.Dockerfile
+      context: ../backend-online
+      dockerfile: ../docker/backend-online.Dockerfile
     container_name: echonest-backend-online
     depends_on:
       postgres:
         condition: service_healthy
-      qdrant:
+      redis:
         condition: service_healthy
+      qdrant:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql://echonest:echonest_password@postgres:5432/echonest
-      QDRANT_URL: http://qdrant:6333
-      JWT_SECRET: your_jwt_secret_key_here
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/echonest
+      QDRANT_URL: http://qdrant
+      QDRANT_PORT: 6333
+      QDRANT_COLLECTION: echonest_documents
+      SECRET_KEY: your_secret_key_here
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CORS_ORIGINS: "*"
+      UPLOAD_FOLDER: /app/data/uploads
+      MAX_CONTENT_SIZE_MB: 100
+      MAX_DOCUMENTS_PER_DEVICE: 10
+      DEVICE_TOKEN_EXPIRE_DAYS: 365
+      OTA_FOLDER: /app/data/ota
       ENVIRONMENT: development
       LOG_LEVEL: info
-      UPLOAD_FOLDER: /app/data/uploads
       CONTENT_FOLDER: /app/data/content
       MODELS_FOLDER: /app/data/models
-      FRONTEND_URL: http://localhost:3000
+      FRONTEND_URL: http://localhost:8080
       SMTP_HOST: smtp.example.com
       SMTP_PORT: 587
       SMTP_USERNAME: your_smtp_username
@@ -65,68 +129,18 @@ services:
       SMTP_TLS: 'true'
     volumes:
       - backend_online_data:/app/data
+    networks:
+      - echo-nest-ai-network
     ports:
       - "8000:8000"
     restart: unless-stopped
 
-  # Backend offline server
-  backend-offline:
-    build:
-      context: .
-      dockerfile: docker/backend-offline.Dockerfile
-    container_name: echonest-backend-offline
-    environment:
-      SQLITE_DB_PATH: /app/data/sqlite/echonest.db
-      JWT_SECRET: your_jwt_secret_key_here
-      ENVIRONMENT: development
-      LOG_LEVEL: info
-      UPLOAD_FOLDER: /app/data/uploads
-      CONTENT_FOLDER: /app/data/content
-      MODELS_FOLDER: /app/data/models
-    volumes:
-      - backend_offline_data:/app/data
-    ports:
-      - "8001:8001"
-    restart: unless-stopped
-
-  # Frontend application
-  frontend:
-    build:
-      context: .
-      dockerfile: docker/frontend.Dockerfile
-    container_name: echonest-frontend
-    depends_on:
-      - backend-online
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
-      NEXT_PUBLIC_OFFLINE_API_URL: http://localhost:8001
-    ports:
-      - "3000:3000"
-    restart: unless-stopped
-
-  # Device client (for testing)
-  device-client:
-    build:
-      context: .
-      dockerfile: docker/device-client.Dockerfile
-    container_name: echonest-device-client
-    depends_on:
-      - backend-offline
-    environment:
-      DEVICE_ID: device_001
-      CHILD_ID: child_001
-      BACKEND_ONLINE_URL: http://backend-online:8000
-      BACKEND_OFFLINE_URL: http://backend-offline:8001
-      OFFLINE_MODE: 'false'
-    volumes:
-      - device_client_data:/app/data
-    ports:
-      - "8002:8002"
-    restart: unless-stopped
-
 volumes:
-  postgres_data:
+  postgres-data:
+  redis_data:
   qdrant_data:
   backend_online_data:
-  backend_offline_data:
-  device_client_data:
+
+networks:
+  echo-nest-ai-network:
+    driver: bridge
