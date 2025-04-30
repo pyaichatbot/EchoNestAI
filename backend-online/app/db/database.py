@@ -4,23 +4,6 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
-# Create async engine
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=False,
-    future=True,
-    poolclass=NullPool  # Using NullPool for better control over connection lifecycle
-)
-
-# Create async session factory
-async_session = sessionmaker(
-    engine, 
-    class_=AsyncSession, 
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False
-)
-
 # Create declarative base for models
 Base = declarative_base()
 
@@ -29,7 +12,22 @@ async def init_db():
     """Initialize database connections and perform startup tasks"""
     # In production, we don't create tables here - use Alembic migrations instead
     # This function is primarily for establishing connections and initialization
-    pass
+    global engine
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        future=True,
+        poolclass=NullPool  # Using NullPool for better control over connection lifecycle
+    )
+    # Create async session factory
+    global async_session
+    async_session = sessionmaker(
+        engine, 
+        class_=AsyncSession, 
+        expire_on_commit=False,
+        autocommit=False,
+        autoflush=False
+    )
 
 async def close_db():
     """Close database connections and perform cleanup tasks"""

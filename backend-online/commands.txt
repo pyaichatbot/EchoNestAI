@@ -1,0 +1,18 @@
+# 1. Open the PostgreSQL shell as the postgres superuser
+psql -U postgres
+
+-- 2. Create the user (if it doesn't exist)
+CREATE USER echonest WITH PASSWORD 'echonest_password';
+
+-- 3. Create the database (if it doesn't exist)
+CREATE DATABASE echonest_db OWNER echonest;
+
+-- 4. Grant all privileges on the database to the user
+GRANT ALL PRIVILEGES ON DATABASE echonest_db TO echonest;
+
+
+
+---------------
+.venv/bin/alembic revision --autogenerate -m "init schema"
+
+.venv/bin/alembic upgrade head

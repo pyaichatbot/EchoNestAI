@@ -3,12 +3,17 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 class ChatBase(BaseModel):
-    input: str
-    child_id: Optional[str] = None
-    group_id: Optional[str] = None
-    document_scope: Optional[List[str]] = None
-    language: str = "en"
-    session_id: Optional[str] = None
+    input: str = Field(..., alias="input")
+    child_id: Optional[str] = Field(None, alias="childId")
+    group_id: Optional[str] = Field(None, alias="groupId")
+    document_scope: Optional[List[str]] = Field(None, alias="documentScope")
+    language: str = Field("en", alias="language")
+    session_id: Optional[str] = Field(None, alias="sessionId")
+    context: Optional[str] = Field(None, alias="context")  # Optional context from frontend
+
+    class Config:
+        allow_population_by_field_name = True
+        populate_by_name = True
 
 class ChatRequest(ChatBase):
     pass

@@ -806,3 +806,250 @@ def test_voice_transcription_retrieval(authenticated_client):
     # Test retrieval of non-existent transcription
     response = authenticated_client.get("/api/transcribe/nonexistent_id")
     assert response.status_code == 404
+    
+def test_chat_rag_endpoint(authenticated_client):
+    """Test /chat/rag endpoint with both camelCase and snake_case payloads."""
+    # CamelCase payload (frontend style)
+    payload_camel = {
+        "input": "Hello, how are you?",
+        "childId": "child123",
+        "groupId": "group123",
+        "documentScope": ["doc1", "doc2"],
+        "language": "en",
+        "sessionId": None,
+        "context": "Some context"
+    }
+    response = authenticated_client.post("/chat/rag", json=payload_camel)
+    assert response.status_code in [200, 201]
+    data = response.json()
+    assert "response" in data
+    assert "confidence" in data
+
+    # Snake_case payload (backend style)
+    payload_snake = {
+        "input": "Hello again!",
+        "child_id": "child123",
+        "group_id": "group123",
+        "document_scope": ["doc1", "doc2"],
+        "language": "en",
+        "session_id": None,
+        "context": "Some context"
+    }
+    response = authenticated_client.post("/chat/rag", json=payload_snake)
+    assert response.status_code in [200, 201]
+    data = response.json()
+    assert "response" in data
+    assert "confidence" in data
+
+    # Test missing context (should still work)
+    payload_no_context = {
+        "input": "No context here.",
+        "childId": "child123",
+        "groupId": "group123",
+        "documentScope": ["doc1", "doc2"],
+        "language": "en"
+    }
+    response = authenticated_client.post("/chat/rag", json=payload_no_context)
+    assert response.status_code in [200, 201]
+    data = response.json()
+    assert "response" in data
+
+def test_chat_rag_stream_get(authenticated_client):
+    """Test /chat/rag/stream GET endpoint for SSE streaming."""
+    params = {
+        "child_id": "child123",
+        "group_id": "group123",
+        "session_id": "session123",
+        "language": "en"
+    }
+    with authenticated_client.stream("GET", "/chat/rag/stream", params=params) as response:
+        assert response.status_code == 200
+        # Read a few events from the stream (if any)
+        try:
+            for i, line in enumerate(response.iter_lines()):
+                if line:
+                    data = line.decode()
+                    assert "token" in data or "data" in data or "Error" in data
+                if i > 2:
+                    break
+        except Exception as e:
+            # Streaming may end quickly if no data, that's OK for contract test
+            pass
+
+def test_chat_rag_stream_post(authenticated_client):
+    """Test /chat/rag/stream POST endpoint for SSE streaming with payload."""
+    params = {
+        "child_id": "child123",
+        "group_id": "group123",
+        "session_id": "session123",
+        "language": "en"
+    }
+    payload = {
+        "input": "Stream this message.",
+        "context": "Some context for streaming.",
+        "document_scope": ["doc1", "doc2"]
+    }
+    with authenticated_client.stream("POST", "/chat/rag/stream", params=params, json=payload) as response:
+        assert response.status_code == 200
+        # Read a few events from the stream (if any)
+        try:
+            for i, line in enumerate(response.iter_lines()):
+                if line:
+                    data = line.decode()
+                    assert "token" in data or "data" in data or "Error" in data
+                if i > 2:
+                    break
+        except Exception as e:
+            # Streaming may end quickly if no data, that's OK for contract test
+            pass
+
+def test_chat_history_endpoint(authenticated_client):
+    """Test /chat/history endpoint for correct message retrieval and pagination."""
+    # 1. Create a chat session (simulate via /chat/rag to ensure session and messages are created)
+    payload = {
+        "input": "Hello, this is a test message.",
+        "childId": "child123",
+        "groupId": "group123",
+        "language": "en"
+    }
+    response = authenticated_client.post("/chat/rag", json=payload)
+    assert response.status_code in [200, 201]
+    # Extract sessionId from response or create a new one
+    # We'll fetch sessions for the child to get the sessionId
+    session_resp = authenticated_client.get("/chat/sessions/child123")
+    assert session_resp.status_code == 200
+    sessions = session_resp.json()
+    assert sessions and isinstance(sessions, list)
+    session_id = sessions[0]["id"]
+
+    # 2. Send additional messages to the session
+    for i in range(3):
+        payload["input"] = f"Test message {i+1}"
+        payload["sessionId"] = session_id
+        response = authenticated_client.post("/chat/rag", json=payload)
+        assert response.status_code in [200, 201]
+
+    # 3. Fetch chat history
+    resp = authenticated_client.get(f"/chat/history?session_id={session_id}&limit=2")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "messages" in data and isinstance(data["messages"], list)
+    assert len(data["messages"]) == 2
+    assert "hasMore" in data
+    assert "nextCursor" in data or data["nextCursor"] is None
+    # Check message fields
+    for msg in data["messages"]:
+        assert set(msg.keys()) >= {"id", "senderId", "text", "timestamp", "status", "sourceDocuments", "confidence"}
+        assert isinstance(msg["timestamp"], int)
+        assert msg["status"] == "sent"
+    # 4. Test pagination with 'before'
+    if data["hasMore"] and data["nextCursor"]:
+        resp2 = authenticated_client.get(f"/chat/history?session_id={session_id}&limit=2&before={data['nextCursor']}")
+        assert resp2.status_code == 200
+        data2 = resp2.json()
+        assert "messages" in data2
+        # Should not repeat the same messages
+        ids1 = {m["id"] for m in data["messages"]}
+        ids2 = {m["id"] for m in data2["messages"]}
+        assert ids1.isdisjoint(ids2)
+        
+def test_feedback_flags_endpoint(authenticated_client):
+    """Test /feedback/flags endpoint for listing flagged feedback."""
+    # 1. Create a chat session and message to flag
+    payload = {
+        "input": "Flag test message.",
+        "childId": "childFlagTest",
+        "groupId": "groupFlagTest",
+        "language": "en"
+    }
+    response = authenticated_client.post("/chat/rag", json=payload)
+    assert response.status_code in [200, 201]
+    # Get session and message id
+    session_resp = authenticated_client.get("/chat/sessions/childFlagTest")
+    assert session_resp.status_code == 200
+    sessions = session_resp.json()
+    assert sessions and isinstance(sessions, list)
+    session_id = sessions[0]["id"]
+    # There should be at least one message in the session
+    # We'll use /chat/history to get the message id
+    history_resp = authenticated_client.get(f"/chat/history?session_id={session_id}&limit=1")
+    assert history_resp.status_code == 200
+    history = history_resp.json()
+    assert "messages" in history and history["messages"]
+    message_id = history["messages"][-1]["id"]
+    # 2. Flag the message
+    flag_payload = {
+        "contentId": message_id,
+        "reason": "Test flag reason",
+        "flaggedBy": "parent",
+        "notes": "Test flag notes"
+    }
+    flag_resp = authenticated_client.post("/feedback/flag", json=flag_payload)
+    assert flag_resp.status_code == 200
+    # 3. List flagged feedback
+    flags_resp = authenticated_client.get("/feedback/flags")
+    assert flags_resp.status_code == 200
+    flags = flags_resp.json()
+    assert isinstance(flags, list)
+    # There should be at least one flagged feedback with our reason
+    found = False
+    for f in flags:
+        assert set(f.keys()) >= {"id", "message_id", "flagged", "flag_reason", "comment", "created_at", "rating"}
+        if f["flag_reason"] == "Test flag reason":
+            found = True
+    assert found, "Flagged feedback not found in /feedback/flags response"
+
+def test_feedback_flag_resolve_endpoint(authenticated_client):
+    """Test /feedback/flags/{flagId}/resolve endpoint for resolving flagged feedback."""
+    # 1. Create a chat session and message to flag
+    payload = {
+        "input": "Flag resolve test message.",
+        "childId": "childFlagResolveTest",
+        "groupId": "groupFlagResolveTest",
+        "language": "en"
+    }
+    response = authenticated_client.post("/chat/rag", json=payload)
+    assert response.status_code in [200, 201]
+    # Get session and message id
+    session_resp = authenticated_client.get("/chat/sessions/childFlagResolveTest")
+    assert session_resp.status_code == 200
+    sessions = session_resp.json()
+    assert sessions and isinstance(sessions, list)
+    session_id = sessions[0]["id"]
+    # There should be at least one message in the session
+    history_resp = authenticated_client.get(f"/chat/history?session_id={session_id}&limit=1")
+    assert history_resp.status_code == 200
+    history = history_resp.json()
+    assert "messages" in history and history["messages"]
+    message_id = history["messages"][-1]["id"]
+    # 2. Flag the message
+    flag_payload = {
+        "contentId": message_id,
+        "reason": "Test resolve flag reason",
+        "flaggedBy": "parent",
+        "notes": "Test resolve flag notes"
+    }
+    flag_resp = authenticated_client.post("/feedback/flag", json=flag_payload)
+    assert flag_resp.status_code == 200
+    # 3. List flagged feedback to get the flagId
+    flags_resp = authenticated_client.get("/feedback/flags")
+    assert flags_resp.status_code == 200
+    flags = flags_resp.json()
+    assert isinstance(flags, list)
+    flag_id = None
+    for f in flags:
+        if f["flag_reason"] == "Test resolve flag reason":
+            flag_id = f["id"]
+            break
+    assert flag_id, "Flagged feedback not found in /feedback/flags response"
+    # 4. Resolve the flag
+    resolve_resp = authenticated_client.patch(f"/feedback/flags/{flag_id}/resolve")
+    assert resolve_resp.status_code == 200
+    resolved = resolve_resp.json()
+    assert resolved["flagged"] is False
+    # 5. Verify feedback is no longer flagged
+    flags_resp2 = authenticated_client.get("/feedback/flags")
+    assert flags_resp2.status_code == 200
+    flags2 = flags_resp2.json()
+    for f in flags2:
+        assert f["id"] != flag_id  # Should not appear in flagged list

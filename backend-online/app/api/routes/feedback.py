@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import update, delete
+from sqlalchemy import update, delete, func, and_
 from uuid import uuid4
 from datetime import datetime
 
@@ -330,4 +330,118 @@ async def submit_general_feedback(
         "status": "success",
         "message": "Feedback submitted successfully",
         "feedback_id": feedback.id
+    }
+
+@router.get("/feedback/stats")
+async def get_feedback_stats(
+    startDate: Optional[str] = Query(None),
+    endDate: Optional[str] = Query(None),
+    childId: Optional[str] = Query(None),
+    groupId: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get aggregated feedback statistics for chat messages.
+    Supports filtering by date range, child, and group.
+    """
+    # Build base query
+    query = select(ChatFeedback)
+    # Join with ChatMessage for child/group filtering
+    if childId or groupId:
+        query = query.join(ChatMessage, ChatFeedback.message_id == ChatMessage.id)
+        if childId:
+            query = query.where(ChatMessage.session.has(child_id=childId))
+        if groupId:
+            query = query.where(ChatMessage.session.has(group_id=groupId))
+    # Date filtering
+    if startDate:
+        try:
+            start_dt = datetime.fromisoformat(startDate)
+            query = query.where(ChatFeedback.created_at >= start_dt)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid startDate format. Use ISO8601.")
+    if endDate:
+        try:
+            end_dt = datetime.fromisoformat(endDate)
+            query = query.where(ChatFeedback.created_at <= end_dt)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid endDate format. Use ISO8601.")
+    # Execute query
+    result = await db.execute(query)
+    feedbacks = result.scalars().all()
+    # Aggregate stats
+    total_feedback = len(feedbacks)
+    positive_ratings = sum(1 for f in feedbacks if f.rating and f.rating > 0)
+    negative_ratings = sum(1 for f in feedbacks if f.rating and f.rating < 0)
+    # Placeholder for tags and response quality (not in DB)
+    common_tags = []
+    response_quality_breakdown = {}
+    return {
+        "totalFeedback": total_feedback,
+        "positiveRatings": positive_ratings,
+        "negativeRatings": negative_ratings,
+        "commonTags": common_tags,
+        "responseQualityBreakdown": response_quality_breakdown
+    }
+
+@router.get("/feedback/flags")
+async def list_flagged_feedback(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    List all flagged feedback entries (flagged=True), with pagination.
+    Returns id, message_id, flagged, flag_reason, comment, created_at, rating.
+    """
+    query = select(ChatFeedback).where(ChatFeedback.flagged == True).offset(offset).limit(limit)
+    result = await db.execute(query)
+    feedbacks = result.scalars().all()
+    return [
+        {
+            "id": f.id,
+            "message_id": f.message_id,
+            "flagged": f.flagged,
+            "flag_reason": f.flag_reason,
+            "comment": f.comment,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+            "rating": f.rating
+        }
+        for f in feedbacks
+    ]
+
+@router.patch("/feedback/flags/{flag_id}/resolve")
+async def resolve_flagged_feedback(
+    flag_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Resolve a flagged feedback entry by marking it as not flagged and setting resolved_at.
+    """
+    # Fetch the feedback entry
+    query = select(ChatFeedback).where(ChatFeedback.id == flag_id)
+    result = await db.execute(query)
+    feedback = result.scalars().first()
+    if not feedback:
+        raise HTTPException(status_code=404, detail="Flagged feedback not found")
+    if not feedback.flagged:
+        raise HTTPException(status_code=400, detail="Feedback is not flagged")
+    # Mark as resolved
+    feedback.flagged = False
+    # Optionally add a resolved_at field if present in the model
+    if hasattr(feedback, "resolved_at"):
+        feedback.resolved_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(feedback)
+    return {
+        "id": feedback.id,
+        "message_id": feedback.message_id,
+        "flagged": feedback.flagged,
+        "flag_reason": feedback.flag_reason,
+        "comment": feedback.comment,
+        "created_at": feedback.created_at,
+        "rating": feedback.rating
     }

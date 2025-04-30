@@ -27,10 +27,12 @@ async def process_chat_query(
     child_id: Optional[str] = None,
     group_id: Optional[str] = None,
     document_scope: Optional[List[str]] = None,
-    language: str = "en"
+    language: str = "en",
+    context: Optional[str] = None
 ) -> ChatResponse:
     """
     Process a chat query using RAG (Retrieval Augmented Generation).
+    If context is provided, use it as the only context_passage for the LLM; otherwise, use retrieved documents.
     
     Args:
         db: Database session
@@ -40,6 +42,7 @@ async def process_chat_query(
         group_id: Optional group ID for filtering
         document_scope: Optional list of document IDs to search within
         language: Language code
+        context: Optional context string provided by frontend
         
     Returns:
         ChatResponse object containing the generated response and metadata
@@ -59,28 +62,29 @@ async def process_chat_query(
     # Get chat history for context
     chat_history = await get_chat_history(db, session_id, limit=5)
     
-    # Generate embeddings for the query
-    query_embedding = await generate_embedding(query, language)
-    
-    # Get document retriever
-    retriever = await get_document_retriever()
-    
-    # Retrieve relevant documents
-    documents, total = await retriever.retrieve_documents(
-        db=db,
-        query=query,
-        query_embedding=query_embedding,
-        language=language,
-        document_ids=document_scope,
-        user_id=child_id,
-        group_ids=[group_id] if group_id else None,
-        limit=3,
-        min_score=0.6
-    )
-    
-    # Extract context passages and source IDs
-    context_passages = [doc["content"] for doc in documents]
-    source_documents = [doc["id"] for doc in documents]
+    # If context is provided by frontend, use it as the only context_passage
+    if context:
+        context_passages = [context]
+        source_documents = []
+    else:
+        # Generate embeddings for the query
+        query_embedding = await generate_embedding(query, language)
+        # Get document retriever
+        retriever = await get_document_retriever()
+        # Retrieve relevant documents
+        documents, total = await retriever.retrieve_documents(
+            db=db,
+            query=query,
+            query_embedding=query_embedding,
+            language=language,
+            document_ids=document_scope,
+            user_id=child_id,
+            group_ids=[group_id] if group_id else None,
+            limit=3,
+            min_score=0.6
+        )
+        context_passages = [doc["content"] for doc in documents]
+        source_documents = [doc["id"] for doc in documents]
     
     # Generate response with context using reflection settings from config
     response, confidence = await generate_llm_response(

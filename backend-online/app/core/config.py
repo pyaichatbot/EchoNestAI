@@ -28,7 +28,18 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
     
     # Database settings
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://echonest:echonest_password@postgres:5432/echonest")
+    DATABASE_HOST: str = os.getenv("DATABASE_HOST", "localhost")
+    DATABASE_PORT: int = int(os.getenv("DATABASE_PORT", "5432"))
+    DATABASE_USER: str = os.getenv("DATABASE_USER", "echonest")
+    DATABASE_PASSWORD: str = os.getenv("DATABASE_PASSWORD", "echonest_password")
+    DATABASE_NAME: str = os.getenv("DATABASE_NAME", "echonest_db")
+    @property
+    def DATABASE_URL(self) -> str:
+        """Build Database URL based on host"""        
+        # Use localhost for development, postgres for production/docker
+        host = "localhost" if self.DATABASE_HOST == "localhost" else "postgres"
+        driver = "postgresql+psycopg2" if self.DATABASE_HOST == "localhost" else "postgresql+asyncpg"
+        return f"{driver}://{self.DATABASE_USER}:{self.DATABASE_PASSWORD}@{host}:{self.DATABASE_PORT}/{self.DATABASE_NAME}"
     
     # Redis settings
     REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
