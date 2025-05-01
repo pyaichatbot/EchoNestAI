@@ -51,6 +51,32 @@ class ChatMessageInDB(ChatMessageBase):
 class ChatMessage(ChatMessageInDB):
     pass
 
+class MessagePersistRequest(BaseModel):
+    """Request schema for persisting messages via /chat/messages endpoint"""
+    message_id: str = Field(..., description="Unique ID of the message")
+    sender_id: str = Field(..., description="User ID of the sender")
+    text: str = Field(..., description="Content of the message")
+    timestamp: int = Field(..., description="Unix timestamp of the message")
+    child_id: Optional[str] = Field(None, description="Child ID associated with the chat")
+    group_id: Optional[str] = Field(None, description="Group ID associated with the chat")
+    session_id: str = Field(..., description="Chat session ID")
+    source_documents: Optional[List[str]] = Field(None, description="Referenced document IDs")
+    confidence: Optional[float] = Field(None, description="AI confidence score")
+
+    class Config:
+        allow_population_by_field_name = True
+        schema_extra = {
+            "example": {
+                "message_id": "msg_12345",
+                "sender_id": "user_12345",
+                "text": "Hello, how are you?",
+                "timestamp": 1626982200000,
+                "session_id": "session_12345",
+                "source_documents": ["doc_1", "doc_2"],
+                "confidence": 0.95
+            }
+        }
+
 class ChatSessionBase(BaseModel):
     child_id: Optional[str] = None
     group_id: Optional[str] = None

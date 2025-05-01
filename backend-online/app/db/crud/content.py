@@ -24,6 +24,7 @@ async def get_contents(
     assigned_to: Optional[str] = None,
     content_type: Optional[str] = None,
     language: Optional[str] = None,
+    status: Optional[str] = None,
     skip: int = 0, 
     limit: int = 100
 ) -> List[Content]:
@@ -37,6 +38,9 @@ async def get_contents(
     
     if language:
         query = query.filter(Content.language == language)
+    
+    if status:
+        query = query.filter(Content.status == status)
     
     if assigned_to:
         # Join with assignments to filter by assigned child or group
@@ -72,7 +76,7 @@ async def create_content(
         size_mb=size_mb,
         sync_offline=obj_in.sync_offline,
         archived=False,
-        status="pending",
+        status=getattr(obj_in, 'status', 'pending'),
         version=1,
         created_by=created_by,
         created_at=datetime.utcnow(),

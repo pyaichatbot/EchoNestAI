@@ -104,6 +104,7 @@ async def list_content(
     assigned_to: Optional[str] = None,
     type: Optional[str] = None,
     language: Optional[str] = None,
+    status: Optional[str] = None,
     current_user: Any = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ) -> Any:
@@ -115,7 +116,8 @@ async def list_content(
         user_id=current_user.id, 
         assigned_to=assigned_to, 
         content_type=type, 
-        language=language
+        language=language,
+        status=status
     )
 
 @router.get("/content/{id}", response_model=Content)

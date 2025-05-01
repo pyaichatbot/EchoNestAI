@@ -60,6 +60,7 @@ class ContentBase(BaseModel):
     type: ContentType
     language: Optional[str] = "en"
     sync_offline: Optional[bool] = False
+    status: str = "pending"
 
 class ContentCreate(ContentBase):
     assign_to: List[str] = []  # List of child_id or group_id

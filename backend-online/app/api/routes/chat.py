@@ -11,7 +11,8 @@ from app.db.database import get_db
 from app.db.schemas.chat import (
     ChatRequest, ChatResponse, ChatSession, 
     ChatMessage, ChatFeedback, SupportedLanguage,
-    LanguageDetectionRequest, LanguageDetectionResponse
+    LanguageDetectionRequest, LanguageDetectionResponse,
+    MessagePersistRequest
 )
 from app.api.deps.auth import get_current_active_user
 from app.db.crud.chat import (
@@ -22,7 +23,9 @@ from app.db.crud.chat import (
 from app.llm.chat_service import process_chat_query, stream_chat_response
 from app.sse.event_manager import chat_stream_manager
 from app.services.language_service import detect_language, get_supported_languages
+from app.core.logging import setup_logging
 
+logger = setup_logging(__name__)
 router = APIRouter(tags=["chat"])
 
 @router.post("/chat/rag", response_model=ChatResponse)
@@ -268,3 +271,65 @@ async def get_chat_history_endpoint(
         }
     messages = [msg_to_frontend(m) for m in paged_msgs]
     return {"messages": messages, "hasMore": has_more, "nextCursor": next_cursor}
+
+@router.post("/chat/messages", status_code=status.HTTP_201_CREATED)
+async def persist_message(
+    message: MessagePersistRequest,
+    current_user: Any = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+) -> Any:
+    """
+    Persist a chat message from the frontend.
+    
+    This endpoint allows the frontend to store messages in the backend database,
+    including both user messages and AI responses.
+    """
+    logger.info(f"Persisting message {message.message_id} for session {message.session_id}")
+    
+    # Verify the session exists, create if it doesn't
+    sessions = await get_chat_session(db, id=message.session_id)
+    if not sessions:
+        logger.info(f"Creating new session {message.session_id}")
+        await create_chat_session(
+            db, 
+            child_id=message.child_id,
+            group_id=message.group_id
+        )
+    
+    # Determine if this is a user or AI message by comparing sender_id with current user
+    is_user = message.sender_id == current_user.id
+    
+    # Convert source_documents from list to JSON string if provided
+    source_docs = None
+    if message.source_documents:
+        source_docs = json.dumps(message.source_documents)
+    
+    # Create the message
+    try:
+        created_message = await create_chat_message(
+            db,
+            session_id=message.session_id,
+            is_user=is_user,
+            content=message.text,
+            source_documents=source_docs,
+            confidence=message.confidence
+        )
+        
+        logger.info(f"Message {message.message_id} persisted successfully")
+        
+        # Return the created message
+        return {
+            "id": created_message.id,
+            "session_id": created_message.session_id,
+            "is_user": created_message.is_user,
+            "content": created_message.content,
+            "source_documents": created_message.source_documents,
+            "confidence": created_message.confidence,
+            "created_at": created_message.created_at
+        }
+    except Exception as e:
+        logger.error(f"Error persisting message: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist message"
+        )

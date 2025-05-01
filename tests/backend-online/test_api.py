@@ -1053,3 +1053,72 @@ def test_feedback_flag_resolve_endpoint(authenticated_client):
     flags2 = flags_resp2.json()
     for f in flags2:
         assert f["id"] != flag_id  # Should not appear in flagged list
+
+def test_chat_messages_endpoint(authenticated_client):
+    """Test /chat/messages endpoint for persisting chat messages."""
+    # 1. Create a user message
+    user_message = {
+        "message_id": "test_msg_user_123",
+        "sender_id": "test_user_id",  # This matches the authenticated user
+        "text": "Hello, this is a test user message",
+        "timestamp": int(datetime.datetime.now().timestamp() * 1000),
+        "session_id": "test_session_123",
+        "child_id": "test_child_123",
+        "group_id": None,
+        "source_documents": None,
+        "confidence": None
+    }
+    
+    # 2. Send user message
+    response = authenticated_client.post("/chat/messages", json=user_message)
+    assert response.status_code == 201
+    
+    # 3. Verify the response
+    data = response.json()
+    assert data["session_id"] == user_message["session_id"]
+    assert data["is_user"] == True  # Should be recognized as a user message
+    assert data["content"] == user_message["text"]
+    
+    # 4. Create a bot message
+    bot_message = {
+        "message_id": "test_msg_bot_123",
+        "sender_id": "bot_id",  # Different from authenticated user
+        "text": "I am an AI assistant response",
+        "timestamp": int(datetime.datetime.now().timestamp() * 1000),
+        "session_id": "test_session_123",
+        "child_id": "test_child_123",
+        "group_id": None,
+        "source_documents": ["doc1", "doc2"],
+        "confidence": 0.95
+    }
+    
+    # 5. Send bot message
+    response = authenticated_client.post("/chat/messages", json=bot_message)
+    assert response.status_code == 201
+    
+    # 6. Verify the response
+    data = response.json()
+    assert data["session_id"] == bot_message["session_id"]
+    assert data["is_user"] == False  # Should be recognized as a bot message
+    assert data["content"] == bot_message["text"]
+    assert data["confidence"] == bot_message["confidence"]
+    assert "source_documents" in data
+    
+    # 7. Optional: Verify messages exist in the session history
+    history_response = authenticated_client.get(f"/chat/history?session_id={user_message['session_id']}")
+    assert history_response.status_code == 200
+    history = history_response.json()
+    assert "messages" in history
+    assert len(history["messages"]) >= 2  # At least the two messages we created
+    
+    # Find our messages in the history
+    user_msg_found = False
+    bot_msg_found = False
+    for msg in history["messages"]:
+        if msg["text"] == user_message["text"]:
+            user_msg_found = True
+        if msg["text"] == bot_message["text"]:
+            bot_msg_found = True
+    
+    assert user_msg_found, "User message not found in chat history"
+    assert bot_msg_found, "Bot message not found in chat history"

@@ -16,3 +16,5 @@ GRANT ALL PRIVILEGES ON DATABASE echonest_db TO echonest;
 .venv/bin/alembic revision --autogenerate -m "init schema"
 
 .venv/bin/alembic upgrade head
+
+.venv/bin/alembic revision --autogenerate -m "add status to content"

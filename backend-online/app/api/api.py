@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.routes import auth, content, chat, devices, dashboard, events, language, voice, feedback
+from app.api.routes import auth, content, chat, devices, dashboard, events, language, voice, feedback, children
 from app.core.config import settings
 
 # Create versioned router
@@ -58,4 +58,10 @@ api_router.include_router(
     feedback.router,
     prefix="/feedback",
     tags=["Feedback"]
+)
+
+api_router.include_router(
+    children.router,
+    prefix="/children",
+    tags=["Children"]
 )

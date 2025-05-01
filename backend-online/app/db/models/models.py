@@ -93,6 +93,7 @@ class Content(Base):
     size_mb = Column(Integer, nullable=False)
     sync_offline = Column(Boolean, default=False)
     archived = Column(Boolean, default=False)
+    status = Column(String, default="pending", nullable=False)
     version = Column(Integer, default=1)
     created_by = Column(String, ForeignKey("users.id"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
