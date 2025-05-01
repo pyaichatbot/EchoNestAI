@@ -100,6 +100,8 @@ class ChatFeedbackBase(BaseModel):
     comment: Optional[str] = None
     flagged: bool = False
     flag_reason: Optional[str] = None
+    tags: Optional[List[str]] = None
+    responseQuality: Optional[str] = None
 
 class ChatFeedbackCreate(ChatFeedbackBase):
     pass

@@ -12,6 +12,17 @@ from app.services.metrics_service import (
     get_child_metrics, get_group_metrics, get_events,
     update_notification_settings, get_notification_settings
 )
+from app.db.schemas.content import (
+    LearningProgressSummary,
+    TeacherDashboardOverview,
+    GroupActivity
+)
+from app.db.crud.dashboard import (
+    get_child_progress_summary,
+    get_group_progress_summary,
+    get_group_activity_summary,
+    get_teacher_overview
+)
 
 router = APIRouter(tags=["dashboard"])
 
@@ -80,3 +91,43 @@ async def update_user_notification_settings(
     Update user notification settings.
     """
     return await update_notification_settings(db, user_id=current_user.id, obj_in=settings_update)
+
+@router.get("/dashboard/metrics/child/{child_id}/progress", response_model=LearningProgressSummary)
+async def api_child_progress_summary(
+    child_id: str,
+    current_user: any = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        return await get_child_progress_summary(db, child_id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@router.get("/dashboard/metrics/group/{group_id}/progress", response_model=LearningProgressSummary)
+async def api_group_progress_summary(
+    group_id: str,
+    current_user: any = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        return await get_group_progress_summary(db, group_id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@router.get("/dashboard/metrics/group/{group_id}/activities", response_model=List[GroupActivity])
+async def api_group_activity_summary(
+    group_id: str,
+    current_user: any = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        return await get_group_activity_summary(db, group_id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@router.get("/dashboard/metrics/teacher/overview", response_model=TeacherDashboardOverview)
+async def api_teacher_overview(
+    current_user: any = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    return await get_teacher_overview(db, current_user.id)

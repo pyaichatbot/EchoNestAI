@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, Enum
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, Enum, Float
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta
 import json
 from typing import Dict, Any
+from sqlalchemy.dialects.postgresql import JSONB
 
 from app.db.database import Base
 
@@ -76,6 +77,7 @@ class Group(Base):
     teacher = relationship("User", back_populates="groups")
     devices = relationship("Device", back_populates="group")
     content_assignments = relationship("ContentAssignment", back_populates="group")
+    activities = relationship("GroupActivity", back_populates="group", cascade="all, delete-orphan")
 
 class ContentType(str, enum.Enum):
     DOCUMENT = "document"
@@ -204,6 +206,8 @@ class ChatFeedback(Base):
     flagged = Column(Boolean, default=False)
     flag_reason = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    tags = Column(JSONB, default=list)
+    response_quality = Column(String, nullable=True)
     
     # Relationships
     message = relationship("ChatMessage", back_populates="feedback")
@@ -324,4 +328,20 @@ class Event(Base):
             meta: Dictionary containing metadata values
         """
         self.event_meta = json.dumps(meta)
+
+class GroupActivity(Base):
+    __tablename__ = "group_activities"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    group_id = Column(String, ForeignKey("groups.id"), nullable=False)
+    activity_type = Column(String, nullable=False)
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    duration = Column(Integer, nullable=False)
+    participants = Column(Integer, nullable=False)
+    completion_rate = Column(Float, nullable=False)
+    description = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    group = relationship("Group", back_populates="activities")
 

@@ -57,6 +57,8 @@ async def create_chat_feedback(
         existing_feedback.comment = feedback.comment
         existing_feedback.flagged = feedback.flagged
         existing_feedback.flag_reason = feedback.flag_reason
+        existing_feedback.tags = feedback.tags
+        existing_feedback.response_quality = feedback.responseQuality
         await db.commit()
         await db.refresh(existing_feedback)
         
@@ -67,6 +69,8 @@ async def create_chat_feedback(
             comment=existing_feedback.comment,
             flagged=existing_feedback.flagged,
             flag_reason=existing_feedback.flag_reason,
+            tags=existing_feedback.tags,
+            responseQuality=existing_feedback.response_quality,
             created_at=existing_feedback.created_at
         )
     
@@ -78,6 +82,8 @@ async def create_chat_feedback(
         comment=feedback.comment,
         flagged=feedback.flagged,
         flag_reason=feedback.flag_reason,
+        tags=feedback.tags,
+        response_quality=feedback.responseQuality,
         created_at=datetime.utcnow()
     )
     
@@ -94,6 +100,8 @@ async def create_chat_feedback(
         comment=new_feedback.comment,
         flagged=new_feedback.flagged,
         flag_reason=new_feedback.flag_reason,
+        tags=new_feedback.tags,
+        responseQuality=new_feedback.response_quality,
         created_at=new_feedback.created_at
     )
 
@@ -374,9 +382,18 @@ async def get_feedback_stats(
     total_feedback = len(feedbacks)
     positive_ratings = sum(1 for f in feedbacks if f.rating and f.rating > 0)
     negative_ratings = sum(1 for f in feedbacks if f.rating and f.rating < 0)
-    # Placeholder for tags and response quality (not in DB)
-    common_tags = []
+    # Aggregate tags
+    tag_counts = {}
+    for f in feedbacks:
+        if f.tags:
+            for tag in f.tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    common_tags = [{"tag": tag, "count": count} for tag, count in tag_counts.items()]
+    # Aggregate response quality
     response_quality_breakdown = {}
+    for f in feedbacks:
+        if f.response_quality:
+            response_quality_breakdown[f.response_quality] = response_quality_breakdown.get(f.response_quality, 0) + 1
     return {
         "totalFeedback": total_feedback,
         "positiveRatings": positive_ratings,

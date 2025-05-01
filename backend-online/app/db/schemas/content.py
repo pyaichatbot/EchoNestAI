@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, constr
-from typing import Optional, List, Dict, Any, Annotated
+from typing import Optional, List, Dict, Any, Annotated, Literal
 from datetime import datetime
 from app.db.models.models import ContentType
 
@@ -192,3 +192,80 @@ class RelevantDocumentsResponse(BaseModel):
                 "total_found": 1
             }
         }
+
+class GroupActivityBase(BaseModel):
+    group_id: str
+    activity_type: str
+    timestamp: datetime
+    duration: int
+    participants: int
+    completion_rate: float
+    description: Optional[str] = None
+
+class GroupActivityCreate(GroupActivityBase):
+    pass
+
+class GroupActivityUpdate(BaseModel):
+    activity_type: Optional[str] = None
+    timestamp: Optional[datetime] = None
+    duration: Optional[int] = None
+    participants: Optional[int] = None
+    completion_rate: Optional[float] = None
+    description: Optional[str] = None
+
+class GroupActivityInDB(GroupActivityBase):
+    id: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class GroupActivity(GroupActivityInDB):
+    pass
+
+class ProgressByCategory(BaseModel):
+    category: str
+    progress: float
+
+class LearningProgress(BaseModel):
+    id: str
+    user_id: str
+    content_id: str
+    progress: float
+    score: Optional[float] = None
+    time_spent: int
+    last_accessed: int
+    completed_sections: List[str]
+    mastery_level: Optional[Literal['beginner', 'intermediate', 'advanced', 'expert']] = None
+
+class LearningProgressSummary(BaseModel):
+    average_progress: float
+    completion_rate: float
+    time_spent: int
+    strengths: List[str]
+    areas_for_improvement: List[str]
+    recent_progress: List[LearningProgress]
+    progress_by_category: List[ProgressByCategory]
+
+class DashboardMetric(BaseModel):
+    title: str
+    value: int
+    description: str
+    change: Optional[Dict[str, Any]] = None
+
+class ActivityItem(BaseModel):
+    id: str
+    text: str
+    timestamp: str
+    type: str
+    status: str
+
+class SystemStatus(BaseModel):
+    label: str
+    value: str
+    status: str
+
+class TeacherDashboardOverview(BaseModel):
+    metrics: List[DashboardMetric]
+    recent_activity: List[ActivityItem]
+    system_status: List[SystemStatus]

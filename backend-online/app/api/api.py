@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.routes import auth, content, chat, devices, dashboard, events, language, voice, feedback, children
+from app.api.routes import auth, content, chat, devices, dashboard, events, language, voice, feedback, children, groups, students
 from app.core.config import settings
 
 # Create versioned router
@@ -64,4 +64,16 @@ api_router.include_router(
     children.router,
     prefix="/children",
     tags=["Children"]
+)
+
+api_router.include_router(
+    groups.router,
+    prefix="/groups",
+    tags=["Groups"]
+)
+
+api_router.include_router(
+    students.router,
+    prefix="/students",
+    tags=["Students"]
 )
