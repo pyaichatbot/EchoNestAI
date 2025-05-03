@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  voice-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./output:/app/output
+      - whisper-cache:/root/.cache/whisper
+      - tts-cache:/root/.cache/torch/hub
+    environment:
+      # Server configuration
+      LOG_LEVEL: "INFO"
+      LOG_FILE: "speech_service.log"
+      
+      # Redis configuration
+      REDIS_HOST: "redis"
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_DB: 0
+      CACHE_TTL: 86400
+      
+      # Rate limiting
+      RATE_LIMIT_TIER1: 100
+      RATE_LIMIT_TIER2: 300
+      
+      # Third-party service API keys (replace with actual keys in production)
+      GOOGLE_API_KEY: ""
+      AZURE_SPEECH_KEY: ""
+      AZURE_SPEECH_REGION: "eastus"
+      AWS_ACCESS_KEY: ""
+      AWS_SECRET_KEY: ""
+      AWS_REGION: "us-east-1"
+      
+      # Cost controls
+      MAX_DAILY_COST: 10.0
+      COST_TIER_RATIO: 0.2
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  whisper-cache:
+  tts-cache: 
