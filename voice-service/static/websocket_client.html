@@ -275,8 +275,15 @@
                     processor.onaudioprocess = (event) => {
                         if (this.isRecording && this.websocket && this.websocket.readyState === WebSocket.OPEN) {
                             const inputData = event.inputBuffer.getChannelData(0);
-                            const audioData = this.convertFloat32ToInt16(inputData);
-                            this.websocket.send(audioData);
+                            
+                            // Simple VAD - check audio level before sending
+                            const audioLevel = inputData.reduce((sum, sample) => sum + Math.abs(sample), 0) / inputData.length;
+                            
+                            // Only send if audio level is above threshold (not silence)
+                            if (audioLevel > 0.01) {
+                                const audioData = this.convertFloat32ToInt16(inputData);
+                                this.websocket.send(audioData);
+                            }
                         }
                     };
                     
@@ -347,7 +354,7 @@
                         }
                         break;
                     case 'intent_detected':
-                        this.addMessage('System', `Intent detected: ${data.intent.intent} (confidence: ${Math.round(data.intent.confidence * 100)}%)`, 'intent');
+                        this.addMessage('System', `Intent detected: ${data.intent.intent_type} (confidence: ${Math.round(data.intent.confidence * 100)}%)`, 'intent');
                         break;
                     case 'content_safety_violation':
                         this.addMessage('System', `⚠️ Content safety violation: ${data.reason} (severity: ${data.severity})`, 'safety-violation');

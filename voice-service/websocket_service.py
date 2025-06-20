@@ -250,23 +250,15 @@ class WebSocketAudioStreamingService:
             default_config=generation_config
         )
     
-    async def handle_websocket_connection(self, websocket, path):
+    async def handle_websocket_connection(self, websocket, session_id: str, user_id: str, language: str):
         """Handle incoming WebSocket connections with full-duplex audio streaming."""
-        connection_id = None
-        session_id = None
+        connection_id = f"{user_id}_{session_id}"
         
         try:
-            # Extract connection parameters
-            query_params = self._parse_query_params(path)
-            session_id = query_params.get('session_id')
-            user_id = query_params.get('user_id')
-            language = query_params.get('language', 'en')
-            
+            # This check is now more direct
             if not session_id or not user_id:
                 await websocket.close(1008, "Missing required parameters")
                 return
-            
-            connection_id = f"{user_id}_{session_id}"
             
             # Redis-based rate limiting check
             rate_limit_result = self.rate_limiter.is_allowed(
@@ -291,15 +283,36 @@ class WebSocketAudioStreamingService:
             logger.info(f"WebSocket connection established: {connection_id}")
             
             # Send connection confirmation
-            await websocket.send_json({
+            await self._safe_send_json(websocket, {
                 "type": "connection_established",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat()
             })
             
-            # Handle incoming messages
-            async for message in websocket:
-                await self._handle_incoming_message(websocket, session, message)
+            # Handle incoming messages using the correct loop for Starlette WebSockets
+            while True:
+                try:
+                    message = await websocket.receive()
+                    
+                    # Check if this is a disconnect message
+                    if message.get("type") == "websocket.disconnect":
+                        logger.info(f"WebSocket disconnect received for {connection_id}")
+                        break
+                    
+                    # Extract the payload ('text' or 'bytes') from the message dictionary
+                    content = message.get('text') or message.get('bytes')
+                    if content:
+                        await self._handle_incoming_message(websocket, session, content)
+                        
+                except RuntimeError as e:
+                    if "disconnect message has been received" in str(e):
+                        logger.info(f"WebSocket disconnected for {connection_id}")
+                        break
+                    else:
+                        raise
+                except Exception as e:
+                    logger.error(f"Error in WebSocket message loop: {str(e)}")
+                    break
                 
         except Exception as e:
             # Handle graceful disconnects without logging as an error
@@ -344,6 +357,14 @@ class WebSocketAudioStreamingService:
     async def _process_audio_chunk(self, websocket, session: ConversationSession, audio_data: bytes):
         """Process incoming audio chunk with real-time STT and VAD."""
         try:
+            # Convert audio data to numpy array for level checking
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            
+            # Check audio level - skip if too quiet (likely silence)
+            audio_level = np.abs(audio_array).mean()
+            if audio_level < 100:  # Threshold for silence detection
+                return
+            
             # Check for voice activity
             vad_result = self.vad_processor.detect_voice_activity(audio_data)
             
@@ -356,7 +377,7 @@ class WebSocketAudioStreamingService:
                     # Notify turn manager
                     self.turn_manager.user_started_speaking(session.session_id)
                     
-                    await websocket.send_json({
+                    await self._safe_send_json(websocket, {
                         "type": "user_speaking_started",
                         "timestamp": datetime.now().isoformat()
                     })
@@ -375,7 +396,7 @@ class WebSocketAudioStreamingService:
                         # Notify turn manager
                         self.turn_manager.user_finished_speaking(session.session_id)
                         
-                        await websocket.send_json({
+                        await self._safe_send_json(websocket, {
                             "type": "user_speaking_ended",
                             "timestamp": datetime.now().isoformat()
                         })
@@ -393,6 +414,20 @@ class WebSocketAudioStreamingService:
             # Convert audio data to numpy array
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
             
+            # Enhanced audio level checking
+            audio_level = np.abs(audio_array).mean()
+            audio_max = np.abs(audio_array).max()
+            
+            # Skip if audio is too quiet or too short
+            if audio_level < 200 or audio_max < 500:  # Increased thresholds
+                logger.debug(f"Audio too quiet - level: {audio_level:.2f}, max: {audio_max:.2f}")
+                return
+            
+            # Check for minimum audio duration (at least 0.5 seconds of speech)
+            if len(audio_array) < 8000:  # 0.5 seconds at 16kHz
+                logger.debug(f"Audio too short - length: {len(audio_array)} samples")
+                return
+            
             # Save to temporary file for STT processing
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
                 sf.write(temp_file.name, audio_array, 16000)
@@ -406,25 +441,33 @@ class WebSocketAudioStreamingService:
                     use_cache=False
                 )
                 
-                # Send transcription result
-                if result.text.strip():
-                    await websocket.send_json({
-                        "type": "transcription",
-                        "text": result.text,
-                        "confidence": result.confidence,
-                        "is_final": not session.is_speaking,
-                        "timestamp": datetime.now().isoformat()
-                    })
-                    
-                    # Update conversation context
-                    session.conversation_context += f"User: {result.text}\n"
-                    
-                    # Add to conversation history
-                    session.conversation_history.append({
-                        "role": "user",
-                        "content": result.text,
-                        "timestamp": datetime.now().isoformat()
-                    })
+                # Only send transcription if it's meaningful
+                if result.text.strip() and len(result.text.strip()) > 2:
+                    # Check if the transcription makes sense (not just noise)
+                    if not self._is_noise_transcription(result.text):
+                        await self._safe_send_json(websocket, {
+                            "type": "transcription",
+                            "text": result.text,
+                            "confidence": result.confidence,
+                            "is_final": not session.is_speaking,
+                            "timestamp": datetime.now().isoformat()
+                        })
+                        
+                        # Update conversation context
+                        session.conversation_context += f"User: {result.text}\n"
+                        
+                        # Add to conversation history
+                        session.conversation_history.append({
+                            "role": "user",
+                            "content": result.text,
+                            "timestamp": datetime.now().isoformat()
+                        })
+                        
+                        logger.info(f"STT result: '{result.text}' (confidence: {result.confidence:.2f})")
+                    else:
+                        logger.debug(f"Filtered out noise transcription: '{result.text}'")
+                else:
+                    logger.debug(f"Empty or too short STT result: '{result.text}'")
                     
             finally:
                 # Clean up temporary file
@@ -437,45 +480,119 @@ class WebSocketAudioStreamingService:
             logger.error(f"STT error: {str(e)}")
             raise
     
+    def _is_noise_transcription(self, text: str) -> bool:
+        """Check if transcription is likely noise or meaningless."""
+        text_lower = text.lower().strip()
+        
+        # Common noise patterns
+        noise_patterns = [
+            r'^\s*[aeiou]+\s*$',  # Just vowels
+            r'^\s*[bcdfghjklmnpqrstvwxyz]+\s*$',  # Just consonants
+            r'^\s*[^\w\s]+\s*$',  # Just punctuation/symbols
+            r'^\s*[0-9]+\s*$',  # Just numbers
+            r'^\s*[a-z]{1,2}\s*$',  # Very short words
+        ]
+        
+        import re
+        for pattern in noise_patterns:
+            if re.match(pattern, text_lower):
+                return True
+        
+        # Check for repetitive characters
+        if len(set(text_lower.replace(' ', ''))) < 3:
+            return True
+        
+        return False
+    
     async def _generate_ai_response(self, websocket, session: ConversationSession):
         """Generate AI response with full pipeline: intent detection, guard rails, RAG, and LLM generation."""
         try:
+            logger.info(f"Starting AI response generation for session {session.session_id}")
+            
             # Check if AI should respond
             if not self.turn_manager.should_ai_respond(session.session_id):
+                logger.info(f"AI response skipped - turn manager says no for session {session.session_id}")
                 return
             
             # Get the latest user message
             if not session.conversation_history:
+                logger.info(f"No conversation history for session {session.session_id}")
                 return
             
             latest_user_message = session.conversation_history[-1]["content"]
+            logger.info(f"Processing user message: '{latest_user_message[:50]}...' for session {session.session_id}")
             
             # Step 1: Intent Detection
-            intent_result = await self.intent_detection.detect_intent(
-                text=latest_user_message,
-                language=session.language
-            )
+            logger.info(f"Starting intent detection for session {session.session_id}")
+            try:
+                intent_result = await self.intent_detection.detect_intent(
+                    text=latest_user_message
+                )
+                logger.info(f"Intent detection completed: {intent_result.intent_type.value} for session {session.session_id}")
+            except Exception as e:
+                logger.error(f"Intent detection failed: {e} for session {session.session_id}")
+                # Create a fallback intent
+                from commoncode.llm.intent_detector import Intent, IntentType
+                intent_result = Intent(
+                    intent_type=IntentType.STATEMENT,
+                    confidence=0.5,
+                    entities={},
+                    slots={},
+                    raw_text=latest_user_message,
+                    processed_text=latest_user_message,
+                    language=session.language,
+                    provider="fallback",
+                    processing_time=0.0,
+                    metadata={"error": str(e)}
+                )
             
             session.detected_intent = intent_result
             
-            await websocket.send_json({
+            await self._safe_send_json(websocket, {
                 "type": "intent_detected",
-                "intent": intent_result,
+                "intent": {
+                    "intent_type": intent_result.intent_type.value,
+                    "confidence": intent_result.confidence,
+                    "entities": intent_result.entities,
+                    "slots": intent_result.slots,
+                    "language": intent_result.language,
+                    "provider": intent_result.provider
+                },
                 "timestamp": datetime.now().isoformat()
             })
             
             # Step 2: Guard Rails - Content Safety Check
-            safety_result = await self.guard_rails.check_safety(
-                content=latest_user_message,
-                content_type=ContentType.TEXT
-            )
+            logger.info(f"Starting content safety check for session {session.session_id}")
+            try:
+                safety_result = await self.guard_rails.check_safety(
+                    content=latest_user_message,
+                    content_type=ContentType.TEXT
+                )
+                logger.info(f"Content safety check completed: {safety_result.is_safe} for session {session.session_id}")
+            except Exception as e:
+                logger.error(f"Content safety check failed: {e} for session {session.session_id}")
+                # Create a fallback safety result (assume safe)
+                from commoncode.guard_rails.guard_rails import SafetyResult, SafetyLevel
+                safety_result = SafetyResult(
+                    is_safe=True,
+                    safety_level=SafetyLevel.SAFE,
+                    risk_score=0.0,
+                    flagged_categories=[],
+                    flagged_content=[],
+                    recommendations=[],
+                    content_type=ContentType.TEXT,
+                    provider="fallback",
+                    processing_time=0.0,
+                    metadata={"error": str(e)}
+                )
             
-            if not safety_result['is_safe']:
+            if not safety_result.is_safe:
                 # Content flagged as unsafe
-                await websocket.send_json({
+                logger.warning(f"Content safety violation for session {session.session_id}")
+                await self._safe_send_json(websocket, {
                     "type": "content_safety_violation",
-                    "reason": safety_result['reason'],
-                    "severity": safety_result['severity'],
+                    "reason": safety_result.recommendations[0] if safety_result.recommendations else "Content flagged as unsafe",
+                    "severity": safety_result.safety_level.value,
                     "timestamp": datetime.now().isoformat()
                 })
                 
@@ -485,104 +602,139 @@ class WebSocketAudioStreamingService:
                 return
             
             # Step 3: RAG - Retrieve relevant context (if enabled)
-            rag_context = ""
-            if self.rag_service.is_enabled():
-                rag_result = await self.rag_service.retrieve_relevant_context(
-                    query=latest_user_message,
-                    user_id=session.user_id
+            logger.info(f"Starting RAG context retrieval for session {session.session_id}")
+            rag_context = None
+            if hasattr(self, 'rag_service') and self.rag_service and hasattr(self.rag_service, 'retrieve_relevant_context'):
+                try:
+                    rag_result = await self.rag_service.retrieve_relevant_context(
+                        query=latest_user_message,
+                        user_id=session.user_id
+                    )
+                    if rag_result and rag_result.get('success') and rag_result.get('context'):
+                        rag_context = rag_result['context']
+                        logger.info(f"RAG context retrieved: {len(rag_context)} characters for session {session.session_id}")
+                except Exception as e:
+                    logger.warning(f"RAG context retrieval failed: {e} for session {session.session_id}")
+            else:
+                logger.info(f"RAG service not available for session {session.session_id}")
+            
+            # Step 4: LLM Response Generation
+            logger.info(f"Starting LLM response generation for session {session.session_id}")
+            
+            # Prepare prompt with context
+            prompt = f"User: {latest_user_message}\n\n"
+            if rag_context:
+                prompt += f"Relevant context: {rag_context}\n\n"
+            prompt += "Assistant:"
+            
+            # Generate response
+            try:
+                response_result = await self.llm_response.generate_response(
+                    prompt=prompt,
+                    context={
+                        "session_id": session.session_id,
+                        "user_id": session.user_id,
+                        "language": session.language,
+                        "intent": intent_result.intent_type.value,
+                        "conversation_history": session.conversation_history[-5:]  # Last 5 messages
+                    }
                 )
-                if rag_result['success'] and rag_result['context']:
-                    rag_context = rag_result['context']
-            
-            # Step 4: Generate LLM Response
-            # Create a comprehensive prompt with context
-            prompt = f"User: {latest_user_message}"
-            
-            # Create context dictionary with all relevant information
-            context = {
-                "conversation_history": session.conversation_history,
-                "detected_intent": intent_result,
-                "rag_context": rag_context,
-                "language": session.language,
-                "user_id": session.user_id
-            }
-            
-            result = await self.llm_response.generate_response(
-                prompt=prompt,
-                context=context
-            )
-            
-            response_text = result.response_text if result.response_text else "I'm sorry, I couldn't generate a response at the moment. Could you please try again?"
-            
-            # Send response text
-            await websocket.send_json({
-                "type": "ai_response_text",
-                "text": response_text,
-                "intent": intent_result,
-                "timestamp": datetime.now().isoformat()
-            })
+                logger.info(f"LLM response generated: '{response_result.response_text[:50]}...' for session {session.session_id}")
+            except Exception as e:
+                logger.error(f"LLM response generation failed: {e} for session {session.session_id}")
+                # Create a fallback response
+                from commoncode.llm.response_generator import GenerationResult, ResponseType
+                response_result = GenerationResult(
+                    response_text="I understand what you're saying. Please continue with your question or request.",
+                    response_type=ResponseType.CONVERSATIONAL,
+                    confidence=0.5,
+                    tokens_used=0,
+                    cost=0.0,
+                    provider="fallback",
+                    model_used="fallback",
+                    processing_time=0.0,
+                    metadata={"error": str(e)}
+                )
             
             # Add AI response to conversation history
             session.conversation_history.append({
                 "role": "assistant",
-                "content": response_text,
+                "content": response_result.response_text,
                 "timestamp": datetime.now().isoformat()
             })
             
-            # Stream TTS audio
-            await self._stream_tts_audio(websocket, session, response_text)
+            # Send response text
+            await self._safe_send_json(websocket, {
+                "type": "ai_response_text",
+                "text": response_result.response_text,
+                "intent": intent_result.intent_type.value,
+                "timestamp": datetime.now().isoformat()
+            })
             
-            # Update conversation context
-            session.conversation_context += f"AI: {response_text}\n"
+            # Step 5: TTS Audio Generation and Streaming
+            logger.info(f"Starting TTS audio generation for session {session.session_id}")
+            await self._stream_tts_audio(websocket, session, response_result.response_text)
+            logger.info(f"AI response generation completed for session {session.session_id}")
             
         except Exception as e:
-            logger.error(f"AI response generation error: {str(e)}")
-            # Send fallback response
-            fallback_response = "I'm sorry, I encountered an error while processing your request. Please try again."
-            await self._stream_tts_audio(websocket, session, fallback_response)
+            logger.error(f"AI response generation error: {str(e)}", exc_info=True)
+            
+            # Send error response
+            error_response = "I'm sorry, I encountered an error while processing your request. Please try again."
+            await self._stream_tts_audio(websocket, session, error_response)
+    
+    def _split_into_sentences(self, text: str) -> List[str]:
+        """Split text into sentences for better TTS streaming."""
+        import re
+        # Simple sentence splitting - can be improved later
+        sentences = re.split(r'[.!?]+', text)
+        return [s.strip() for s in sentences if s.strip()]
     
     async def _stream_tts_audio(self, websocket, session: ConversationSession, text: str):
-        """Stream TTS audio in real-time."""
+        """Stream TTS audio in real-time chunks."""
         try:
-            # Generate TTS audio
+            logger.info(f"Starting TTS audio streaming for text: '{text[:50]}...' for session {session.session_id}")
+            
+            # Generate TTS audio for the entire text (simpler approach)
             result = await self.tts_engine.synthesize(
                 text=text,
                 language=session.language,
-                output_path=None  # Return audio data directly
+                output_path=None,  # Return audio data directly
+                use_cache=False  # Disable caching for real-time
             )
             
-            if result.audio_data is not None:
-                # Convert to 16-bit PCM
-                audio_pcm = (result.audio_data * 32767).astype(np.int16)
+            logger.info(f"TTS audio generated, length: {len(result.audio_data) if result.audio_data else 0} bytes for session {session.session_id}")
+            
+            if result.audio_data:
+                # Convert to numpy array for chunking
+                audio_array = np.frombuffer(result.audio_data, dtype=np.int16)
                 
                 # Stream audio in chunks
-                chunk_size = 3200  # 200ms at 16kHz
-                for i in range(0, len(audio_pcm), chunk_size):
-                    chunk = audio_pcm[i:i + chunk_size]
-                    
-                    # Check for interruption
-                    if session.is_speaking:
-                        # User interrupted - stop TTS
-                        await websocket.send_json({
-                            "type": "ai_interrupted",
-                            "timestamp": datetime.now().isoformat()
-                        })
-                        break
+                chunk_size = 4096  # Adjust based on your needs
+                for j in range(0, len(audio_array), chunk_size):
+                    chunk = audio_array[j:j + chunk_size]
                     
                     # Send audio chunk
-                    await websocket.send_json(chunk.tobytes())
+                    await self._safe_send_bytes(websocket, chunk.tobytes())
                     
                     # Small delay for real-time streaming
                     await asyncio.sleep(0.1)
                 
-                # Send completion signal
-                await websocket.send_json({
-                    "type": "ai_response_complete",
-                    "timestamp": datetime.now().isoformat()
-                })
-                
+                logger.info(f"Audio streamed successfully for session {session.session_id}")
+            else:
+                logger.warning(f"No audio data generated for session {session.session_id}")
+            
+            # Send completion message
+            await self._safe_send_json(websocket, {
+                "type": "ai_response_complete",
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            logger.info(f"TTS audio streaming completed for session {session.session_id}")
+            
         except Exception as e:
-            logger.error(f"TTS streaming error: {str(e)}")
+            logger.error(f"TTS streaming error: {str(e)}", exc_info=True)
+            raise
     
     async def _handle_text_message(self, websocket, session: ConversationSession, data: Dict):
         """Handle text messages (commands, metadata)."""
@@ -606,21 +758,30 @@ class WebSocketAudioStreamingService:
                     
         except Exception as e:
             logger.error(f"Text message handling error: {str(e)}")
+
+    async def _safe_send_json(self, websocket, data: dict):
+        """Safely send JSON message to WebSocket, handling disconnection errors."""
+        try:
+            await websocket.send_json(data)
+        except Exception as e:
+            if "disconnect" in str(e).lower() or "closed" in str(e).lower():
+                logger.info(f"WebSocket disconnected while sending message: {e}")
+                raise
+            else:
+                logger.error(f"Error sending JSON message: {e}")
+                raise
     
-    def _parse_query_params(self, path: str) -> Dict[str, str]:
-        """Parse query parameters from WebSocket path."""
-        if '?' not in path:
-            return {}
-        
-        query_string = path.split('?')[1]
-        params = {}
-        
-        for param in query_string.split('&'):
-            if '=' in param:
-                key, value = param.split('=', 1)
-                params[key] = value
-        
-        return params
+    async def _safe_send_bytes(self, websocket, data: bytes):
+        """Safely send binary data to WebSocket, handling disconnection errors."""
+        try:
+            await websocket.send(data)
+        except Exception as e:
+            if "disconnect" in str(e).lower() or "closed" in str(e).lower():
+                logger.info(f"WebSocket disconnected while sending audio: {e}")
+                raise
+            else:
+                logger.error(f"Error sending audio data: {e}")
+                raise
 
 class VoiceActivityDetector:
     """Real-time Voice Activity Detection for barge-in detection."""

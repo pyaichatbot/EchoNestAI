@@ -65,6 +65,22 @@ from fastapi_limiter.depends import RateLimiter
 import websockets
 from websocket_service import WebSocketAudioStreamingService
 
+# Custom JSON encoder for numpy types
+class NumpyJSONEncoder(json.JSONEncoder):
+    """
+    Custom JSON encoder to handle numpy data types during serialization.
+    """
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int_, np.intc, np.intp, np.int8,
+                            np.int16, np.int32, np.int64, np.uint8,
+                            np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float_, np.float16, np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.ndarray,)):
+            return obj.tolist() # Convert arrays to lists
+        return super(NumpyJSONEncoder, self).default(obj)
+
 # Configure logging
 logging.basicConfig(
     level=logging.getLevelName(os.getenv("LOG_LEVEL", "INFO")),
@@ -1989,10 +2005,14 @@ class TTSEngine(BaseEngine):
             if use_cache and self.cache_enabled:
                 try:
                     result_dict = asdict(result)
+                    # Convert numpy array to None if it exists, as we don't cache audio data
+                    if 'audio_data' in result_dict:
+                        result_dict['audio_data'] = None
+                        
                     redis_client.setex(
                         cache_key,
                         CACHE_TTL,
-                        json.dumps(result_dict)
+                        json.dumps(result_dict, cls=NumpyJSONEncoder)
                     )
                 except Exception as e:
                     logger.warning(f"Failed to cache result: {e}")
@@ -2411,8 +2431,10 @@ async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
         await websocket.close(code=1008, reason="Missing user_id parameter")
         return
     
-    # Handle WebSocket connection
-    await websocket_service.handle_websocket_connection(websocket, f"/ws/audio/{session_id}?user_id={user_id}&language={language}")
+    # Handle WebSocket connection by passing parameters directly
+    await websocket_service.handle_websocket_connection(
+        websocket, session_id=session_id, user_id=user_id, language=language
+    )
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")

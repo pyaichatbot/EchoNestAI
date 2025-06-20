@@ -28,7 +28,7 @@ class ResponseType(Enum):
 @dataclass
 class GenerationConfig:
     """Configuration for response generation"""
-    model_name: str = "gpt-3.5-turbo"
+    model_name: str = "claude-3-haiku-20240307"
     temperature: float = 0.7
     max_tokens: int = 1000
     top_p: float = 1.0

@@ -46,7 +46,7 @@ class Intent:
 @dataclass
 class IntentConfig:
     """Configuration for intent detection"""
-    model_name: str = "gpt-3.5-turbo"
+    model_name: str = "claude-3-haiku-20240307"
     temperature: float = 0.1
     max_tokens: int = 150
     confidence_threshold: float = 0.7
