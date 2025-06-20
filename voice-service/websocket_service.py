@@ -249,7 +249,7 @@ class WebSocketAudioStreamingService:
             generators=generators,
             default_config=generation_config
         )
-        
+    
     async def handle_websocket_connection(self, websocket, path):
         """Handle incoming WebSocket connections with full-duplex audio streaming."""
         connection_id = None
@@ -291,26 +291,31 @@ class WebSocketAudioStreamingService:
             logger.info(f"WebSocket connection established: {connection_id}")
             
             # Send connection confirmation
-            await websocket.send(json.dumps({
+            await websocket.send_json({
                 "type": "connection_established",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat()
-            }))
+            })
             
             # Handle incoming messages
             async for message in websocket:
                 await self._handle_incoming_message(websocket, session, message)
                 
-        except websockets.exceptions.ConnectionClosed:
-            logger.info(f"WebSocket connection closed: {connection_id}")
         except Exception as e:
-            logger.error(f"WebSocket error for {connection_id}: {str(e)}")
-            if websocket.open:
-                await websocket.send(json.dumps({
-                    "type": "error",
-                    "message": str(e),
-                    "timestamp": datetime.now().isoformat()
-                }))
+            # Handle graceful disconnects without logging as an error
+            if type(e).__name__ == 'WebSocketDisconnect' or isinstance(e, websockets.exceptions.ConnectionClosed):
+                logger.info(f"WebSocket connection closed: {connection_id}")
+            else:
+                logger.error(f"WebSocket error for {connection_id}: {str(e)}", exc_info=True)
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": str(e),
+                        "timestamp": datetime.now().isoformat()
+                    })
+                except Exception:
+                    # Could not send error to client, probably already disconnected
+                    pass
         finally:
             # Cleanup
             if connection_id:
@@ -330,11 +335,11 @@ class WebSocketAudioStreamingService:
                 await self._handle_text_message(websocket, session, data)
         except Exception as e:
             logger.error(f"Error handling message: {str(e)}")
-            await websocket.send(json.dumps({
+            await websocket.send_json({
                 "type": "error",
                 "message": f"Message processing error: {str(e)}",
                 "timestamp": datetime.now().isoformat()
-            }))
+            })
     
     async def _process_audio_chunk(self, websocket, session: ConversationSession, audio_data: bytes):
         """Process incoming audio chunk with real-time STT and VAD."""
@@ -351,10 +356,10 @@ class WebSocketAudioStreamingService:
                     # Notify turn manager
                     self.turn_manager.user_started_speaking(session.session_id)
                     
-                    await websocket.send(json.dumps({
+                    await websocket.send_json({
                         "type": "user_speaking_started",
                         "timestamp": datetime.now().isoformat()
-                    }))
+                    })
                 
                 session.last_activity = datetime.now()
                 
@@ -370,10 +375,10 @@ class WebSocketAudioStreamingService:
                         # Notify turn manager
                         self.turn_manager.user_finished_speaking(session.session_id)
                         
-                        await websocket.send(json.dumps({
+                        await websocket.send_json({
                             "type": "user_speaking_ended",
                             "timestamp": datetime.now().isoformat()
-                        }))
+                        })
                         
                         # Start AI response
                         await self._generate_ai_response(websocket, session)
@@ -403,13 +408,13 @@ class WebSocketAudioStreamingService:
                 
                 # Send transcription result
                 if result.text.strip():
-                    await websocket.send(json.dumps({
+                    await websocket.send_json({
                         "type": "transcription",
                         "text": result.text,
                         "confidence": result.confidence,
                         "is_final": not session.is_speaking,
                         "timestamp": datetime.now().isoformat()
-                    }))
+                    })
                     
                     # Update conversation context
                     session.conversation_context += f"User: {result.text}\n"
@@ -453,11 +458,11 @@ class WebSocketAudioStreamingService:
             
             session.detected_intent = intent_result
             
-            await websocket.send(json.dumps({
+            await websocket.send_json({
                 "type": "intent_detected",
                 "intent": intent_result,
                 "timestamp": datetime.now().isoformat()
-            }))
+            })
             
             # Step 2: Guard Rails - Content Safety Check
             safety_result = await self.guard_rails.check_safety(
@@ -467,12 +472,12 @@ class WebSocketAudioStreamingService:
             
             if not safety_result['is_safe']:
                 # Content flagged as unsafe
-                await websocket.send(json.dumps({
+                await websocket.send_json({
                     "type": "content_safety_violation",
                     "reason": safety_result['reason'],
                     "severity": safety_result['severity'],
                     "timestamp": datetime.now().isoformat()
-                }))
+                })
                 
                 # Send a safe response
                 safe_response = "I'm sorry, but I cannot respond to that type of content. How can I help you with something else?"
@@ -510,12 +515,12 @@ class WebSocketAudioStreamingService:
             response_text = result.response_text if result.response_text else "I'm sorry, I couldn't generate a response at the moment. Could you please try again?"
             
             # Send response text
-            await websocket.send(json.dumps({
+            await websocket.send_json({
                 "type": "ai_response_text",
                 "text": response_text,
                 "intent": intent_result,
                 "timestamp": datetime.now().isoformat()
-            }))
+            })
             
             # Add AI response to conversation history
             session.conversation_history.append({
@@ -558,23 +563,23 @@ class WebSocketAudioStreamingService:
                     # Check for interruption
                     if session.is_speaking:
                         # User interrupted - stop TTS
-                        await websocket.send(json.dumps({
+                        await websocket.send_json({
                             "type": "ai_interrupted",
                             "timestamp": datetime.now().isoformat()
-                        }))
+                        })
                         break
                     
                     # Send audio chunk
-                    await websocket.send(chunk.tobytes())
+                    await websocket.send_json(chunk.tobytes())
                     
                     # Small delay for real-time streaming
                     await asyncio.sleep(0.1)
                 
                 # Send completion signal
-                await websocket.send(json.dumps({
+                await websocket.send_json({
                     "type": "ai_response_complete",
                     "timestamp": datetime.now().isoformat()
-                }))
+                })
                 
         except Exception as e:
             logger.error(f"TTS streaming error: {str(e)}")
@@ -585,10 +590,10 @@ class WebSocketAudioStreamingService:
             message_type = data.get('type')
             
             if message_type == 'ping':
-                await websocket.send(json.dumps({
+                await websocket.send_json({
                     "type": "pong",
                     "timestamp": datetime.now().isoformat()
-                }))
+                })
             elif message_type == 'command':
                 command = data.get('command')
                 if command == 'stop_ai':
