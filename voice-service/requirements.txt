@@ -8,12 +8,16 @@ starlette>=0.27.0
 # Speech-to-Text and Text-to-Speech
 torch==2.5.1
 torchaudio==2.5.1
-numpy>=1.22.0
+numpy==1.22.0
 soundfile>=0.12.1
 openai-whisper>=20230314
 TTS>=0.17.0
 phonemizer>=3.2.1
 espeakng>=1.0.0
+scipy~=1.11.2
+matplotlib~=3.7.0
+librosa~=0.10.0
+numba~=0.57.0
 
 # Audio and file utilities
 ffmpeg-python>=0.2.0
@@ -44,4 +48,19 @@ s3transfer>=0.7.0
 
 # Language detection
 langdetect
+
+# Parler TTS
+git+https://github.com/huggingface/parler-tts.git
+
+# LLM and AI Services
+openai>=1.0.0
+anthropic>=0.7.0
+tiktoken>=0.5.0
+
+# WebSocket support
+websockets>=11.0.0
+
+# Additional utilities for commoncode
+aiohttp>=3.8.0
+asyncio-mqtt>=0.13.0
 

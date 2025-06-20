@@ -26,6 +26,18 @@ from enum import Enum
 from datetime import datetime, timedelta
 from langdetect import detect, DetectorFactory, LangDetectException
 import requests as pyrequests
+from transformers import AutoTokenizer, AutoFeatureExtractor
+
+# Import configuration
+from config import (
+    TTS_MODEL_ID,
+    TTS_MAX_LOAD_ATTEMPTS,
+    TTS_LOAD_RETRY_DELAY,
+    TTS_DEFAULT_SAMPLING_RATE,
+    TTS_FORCE_DOWNLOAD,
+    TTS_USE_CUDA,
+    TTS_MODEL_CACHE_DIRS
+)
 
 # STT
 from elevenlabs.client import ElevenLabs
@@ -38,15 +50,20 @@ import redis
 from redis.exceptions import RedisError
 
 # For REST API
-from fastapi import FastAPI, File, UploadFile, BackgroundTasks, HTTPException, Depends, Request, Query
+from fastapi import FastAPI, File, UploadFile, BackgroundTasks, HTTPException, Depends, Request, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, validator
 from starlette.status import HTTP_429_TOO_MANY_REQUESTS
 
 # Rate limiting
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
+
+# WebSocket support
+import websockets
+from websocket_service import WebSocketAudioStreamingService
 
 # Configure logging
 logging.basicConfig(
@@ -58,6 +75,14 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+try:
+    from parler_tts import ParlerTTSForConditionalGeneration
+    PARLER_TTS_AVAILABLE = True
+except ImportError:
+    logger.warning("parler-tts library not found. AI4BharatTTSProvider will be unavailable.")
+    PARLER_TTS_AVAILABLE = False
+    class ParlerTTSForConditionalGeneration: pass
 
 # Environment variables with defaults
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -82,8 +107,12 @@ ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY", "")
 MAX_DAILY_COST = float(os.getenv("MAX_DAILY_COST", "10.0"))  # Maximum daily cost in USD
 COST_TIER_RATIO = float(os.getenv("COST_TIER_RATIO", "0.2"))  # Percent of paid API usage (0.0-1.0)
 
-WHISPER_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
-TTS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "torch", "hub") 
+# Model cache directories (always use env, fallback to Docker default)
+WHISPER_CACHE_DIR = os.getenv("WHISPER_CACHE_DIR", "/app/models/whisper")
+TTS_CACHE_DIR = os.getenv("TORCH_HOME", "/app/models/coqui")
+
+# Ensure Coqui TTS uses the correct cache path
+os.environ["TTS_CACHE_PATH"] = os.getenv("TTS_CACHE_PATH", TTS_CACHE_DIR)
 
 ANTHROPIC_API_KEY=os.getenv("ANTHROPIC_API_KEY", "")
 
@@ -599,7 +628,7 @@ class ElevenLabsProvider(STTProvider):
         except Exception as e:
             logger.error(f"ElevenLabs transcription error: {e}")
             raise RuntimeError(f"ElevenLabs transcription failed: {str(e)}")
-        
+
 class WhisperProvider(STTProvider):
     """Whisper-based STT provider"""
     
@@ -666,8 +695,18 @@ class WhisperProvider(STTProvider):
                 self._last_load_attempt = current_time
                 self._load_attempts += 1
                 
-                # Use torch hub to download models with better caching
-                self.model = whisper.load_model(self.model_name, device=self.device)
+                # Use pre-downloaded models from local cache
+                model_cache_dir = os.getenv("WHISPER_CACHE_DIR", "/app/models/whisper")
+                model_path = os.path.join(model_cache_dir, self.model_name)
+                if not os.path.exists(model_path):
+                    logger.warning(f"Model not found in cache: {model_path}, falling back to download")
+                    model_path = None
+                
+                self.model = whisper.load_model(
+                    self.model_name,
+                    device=self.device,
+                    download_root=model_cache_dir
+                )
                 
                 # Reset counter on success
                 self._load_attempts = 0
@@ -1326,7 +1365,7 @@ class AWSSTTProvider(STTProvider):
         except Exception as e:
             logger.error(f"AWS Transcribe error: {e}")
             raise RuntimeError(f"AWS transcription failed: {str(e)}")
-      
+
 class STTEngine(BaseEngine):
     """Production-grade STT engine with multiple provider support"""
     
@@ -1508,64 +1547,316 @@ class CoquiTTSProvider(TTSProvider):
 
     @property
     def cost_per_unit(self) -> float:
-        # Set the real cost per second if known
         return 0.001  # Example: $0.001 per second
     
     def is_available(self) -> bool:
         try:
             if self.tts is None:
-                self.tts = TTS(model_name=self.model_name, progress_bar=False, gpu=self.use_cuda)
+                # Use pre-downloaded models from local cache
+                cache_dir = os.getenv("TORCH_HOME", "/app/models/coqui")
+                if not os.path.exists(cache_dir):
+                    logger.warning(f"Cache directory not found: {cache_dir}, falling back to download")
+                    cache_dir = None
+                
+                self.tts = TTS(
+                    model_name=self.model_name,
+                    progress_bar=False,
+                    gpu=self.use_cuda
+                )
             return True
-        except:
-            logger.exception(f"Coqui TTS model {self.model_name} is not available")
+        except Exception as e:
+            logger.exception(f"Coqui TTS model {self.model_name} is not available: {e}")
             return False
-    
-    def synthesize(self, 
-                  text: str,
-                  voice: Optional[str] = None,
-                  language: Optional[str] = None,
-                  output_path: Optional[str] = None,
-                  **kwargs) -> SynthesisResult:
-        """Synthesize text using Coqui TTS"""
 
-        if self.tts is None and not self.is_available():
+    async def synthesize(self,
+                        text: str,
+                        voice: Optional[str] = None,
+                        language: Optional[str] = None,
+                        output_path: Optional[str] = None,
+                        **kwargs) -> SynthesisResult:
+        """
+        Synthesize speech from text using Coqui TTS.
+        
+        Args:
+            text: The text to synthesize
+            voice: The voice to use (not used for Coqui TTS)
+            language: The language of the text (not used for Coqui TTS)
+            output_path: Path to save the audio file (optional)
+            **kwargs: Additional arguments for model generation
+            
+        Returns:
+            SynthesisResult: The synthesis result containing audio data and metadata
+            
+        Raises:
+            RuntimeError: If the model is not available or synthesis fails
+        """
+        if not self.is_available():
             raise RuntimeError(f"Coqui TTS model {self.model_name} is not available")
 
         start_time = time.time()
 
-        # Build arguments based on model capabilities
-        tts_args = {"text": text}
-        # Only pass language if model is multilingual
-        if hasattr(self.tts, "is_multi_lingual") and getattr(self.tts, "is_multi_lingual", False):
-            if language:
-                tts_args["language"] = language
-        # Only pass speaker if model is multi-speaker
-        if hasattr(self.tts, "is_multi_speaker") and getattr(self.tts, "is_multi_speaker", False):
-            if not voice:
-                raise RuntimeError("Model is multi-speaker but no `speaker` is provided.")
-            tts_args["speaker"] = voice
+        try:
+            # Generate audio
+            audio_array = self.tts.tts(text=text, **kwargs)
+            processing_time = time.time() - start_time
+            duration = len(audio_array) / self.tts.synthesizer.output_sample_rate
 
-        # Generate speech
-        wav = self.tts.tts(**tts_args)
+            # Save audio if output path is provided
+            saved_path = None
+            if output_path:
+                try:
+                    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+                    sf.write(output_path, audio_array, self.tts.synthesizer.output_sample_rate)
+                    saved_path = output_path
+                    logger.info(f"Audio saved to: {output_path}")
+                except Exception as e:
+                    logger.error(f"Failed to save audio to {output_path}: {e}")
 
-        sample_rate = self.tts.synthesizer.output_sample_rate
-        duration = len(wav) / sample_rate
+            # Update cost tracking
+            cost = update_cost_tracker(self.name, "tts", characters=len(text))
 
-        # Save if output path provided
-        if output_path:
-            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-            sf.write(output_path, wav, sample_rate)
+            return SynthesisResult(
+                audio_path=saved_path,
+                audio_data=audio_array if not saved_path else None,
+                sample_rate=self.tts.synthesizer.output_sample_rate,
+                duration=duration,
+                provider=self.name,
+                processing_time=processing_time
+            )
 
-        processing_time = time.time() - start_time
+        except Exception as e:
+            logger.error(f"Coqui TTS synthesis error: {e}")
+            raise RuntimeError(f"Coqui TTS synthesis failed: {str(e)}")
 
-        return SynthesisResult(
-            audio_path=output_path,
-            audio_data=None if output_path else wav,
-            sample_rate=sample_rate,
-            duration=duration,
-            provider=self.name,
-            processing_time=processing_time
-        )
+class AI4BharatTTSProvider(TTSProvider):
+    """
+    TTS provider using AI4Bharat models (like Indic Parler-TTS) via Hugging Face.
+    Production-grade implementation with robust model loading and caching.
+    """
+    SPEAKER_DESCRIPTIONS = {
+        "rohit": "Rohit speaks with a clear voice at a normal pace.",
+        "divya": "Divya's voice is monotone yet slightly fast in delivery, with a very close recording that almost has no background noise.",
+        "aditi": "Aditi speaks with a slightly higher pitch in a close-sounding environment. Her voice is clear, with subtle emotional depth and a normal pace, all captured in high-quality recording.",
+        "sita": "Sita speaks at a fast pace with a slightly low-pitched voice, captured clearly in a close-sounding environment with excellent recording quality.",
+        "karan": "Karan's high-pitched, engaging voice is captured in a clear, close-sounding recording. His slightly slower delivery conveys a positive tone.",
+        "sunita": "Sunita speaks with a high pitch in a close environment. Her voice is clear, with slight dynamic changes, and the recording is of excellent quality.",
+        "jaya": "Jaya speaks with a clear, moderate-pitched voice.",
+        "prakash": "Prakash speaks with a moderate pace and clear articulation.",
+        "suresh": "Suresh has a standard male voice with good clarity.",
+        "anjali": "Anjali speaks with a high pitch at a normal pace in a clear, close-sounding environment.",
+        "yash": "Yash speaks clearly with a standard male pitch.",
+        "default_female": "A female speaker with a slightly low-pitched voice speaks in a very monotonous way, with a close recording quality.",
+        "default_male": "A male speaker with a low-pitched voice speaks in a very monotonous way, with a close recording quality."
+    }
+
+    def __init__(self, model_id: str = TTS_MODEL_ID, device: Optional[str] = None):
+        """
+        Initialize the AI4Bharat TTS provider.
+        
+        Args:
+            model_id: The Hugging Face model ID to use
+            device: The device to run the model on (cuda/cpu)
+        """
+        if not PARLER_TTS_AVAILABLE:
+            raise RuntimeError("parler-tts library is required but not installed.")
+
+        self.model_id = model_id
+        self.device = device or ("cuda" if TTS_USE_CUDA and torch.cuda.is_available() else "cpu")
+        self.model = None
+        self.tokenizer = None
+        self.description_tokenizer = None
+        self.sampling_rate = TTS_DEFAULT_SAMPLING_RATE
+        self._load_attempts = 0
+        self._max_load_attempts = TTS_MAX_LOAD_ATTEMPTS
+        self._last_load_attempt = 0
+        self._model_lock = asyncio.Lock()  # For thread-safe model loading
+        self._is_loaded = False
+
+    @property
+    def name(self) -> str:
+        return f"ai4bharat_{self.model_id.split('/')[-1]}"
+
+    @property
+    def tier(self) -> Tier:
+        return Tier.STANDARD
+
+    @property
+    def cost_per_unit(self) -> float:
+        return 0.0
+
+    def _get_cache_dir(self) -> Optional[str]:
+        """
+        Get the first available cache directory.
+        
+        Returns:
+            Optional[str]: Path to the first available cache directory, or None if none are available
+        """
+        for cache_dir in TTS_MODEL_CACHE_DIRS:
+            if cache_dir and os.path.exists(cache_dir):
+                logger.info(f"Using cache directory: {cache_dir}")
+                return cache_dir
+        logger.warning("No cache directory found, will use default huggingface cache")
+        return None
+
+    async def _load_model(self) -> bool:
+        """
+        Load the model and tokenizers asynchronously.
+        
+        Returns:
+            bool: True if model was loaded successfully, False otherwise
+        """
+        async with self._model_lock:
+            if self.model is not None:
+                return True
+
+            current_time = time.time()
+            if (self._load_attempts >= self._max_load_attempts and 
+                current_time - self._last_load_attempt < TTS_LOAD_RETRY_DELAY):
+                return False
+
+            try:
+                logger.info(f"Attempting to load AI4Bharat model: {self.model_id} to {self.device}")
+                self._last_load_attempt = current_time
+                self._load_attempts += 1
+
+                cache_dir = self._get_cache_dir()
+                if cache_dir:
+                    os.makedirs(cache_dir, exist_ok=True)
+
+                # Load model and tokenizers
+                self.model = ParlerTTSForConditionalGeneration.from_pretrained(
+                    self.model_id,
+                    cache_dir=cache_dir,
+                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                    local_files_only=not TTS_FORCE_DOWNLOAD
+                ).to(self.device)
+
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_id,
+                    cache_dir=cache_dir,
+                    local_files_only=not TTS_FORCE_DOWNLOAD
+                )
+
+                desc_tokenizer_name = getattr(self.model.config, "text_encoder", {}).get("_name_or_path", "google/flan-t5-large")
+                self.description_tokenizer = AutoTokenizer.from_pretrained(
+                    desc_tokenizer_name,
+                    cache_dir=cache_dir,
+                    local_files_only=not TTS_FORCE_DOWNLOAD
+                )
+
+                # Set sampling rate from model config if available
+                if hasattr(self.model.config, "sampling_rate"):
+                    self.sampling_rate = self.model.config.sampling_rate
+                elif hasattr(self.model.config, "audio_encoder") and hasattr(self.model.config.audio_encoder, "sampling_rate"):
+                    self.sampling_rate = self.model.config.audio_encoder.sampling_rate
+                else:
+                    logger.warning(f"Could not determine sampling rate from model config for {self.model_id}, using default: {self.sampling_rate}Hz")
+
+                self._load_attempts = 0
+                logger.info(f"Successfully loaded AI4Bharat model: {self.model_id}")
+                self._is_loaded = True
+                return True
+
+            except Exception as e:
+                logger.exception(f"Failed to load AI4Bharat model {self.model_id}: {e}")
+                self.model = None
+                self.tokenizer = None
+                self.description_tokenizer = None
+                self._is_loaded = False
+                return False
+
+    def is_available(self) -> bool:
+        """
+        Synchronous check: returns True if model is already loaded, False otherwise.
+        """
+        return self.model is not None and self._is_loaded
+
+    async def async_is_available(self) -> bool:
+        """
+        Asynchronous check: loads model if needed, returns True if available.
+        """
+        return await self._load_model()
+
+    async def synthesize(self,
+                        text: str,
+                        voice: Optional[str] = None,
+                        language: Optional[str] = None,
+                        output_path: Optional[str] = None,
+                        **kwargs) -> SynthesisResult:
+        """
+        Synthesize speech from text using the AI4Bharat model.
+        
+        Args:
+            text: The text to synthesize
+            voice: The voice to use (must be one of SPEAKER_DESCRIPTIONS keys)
+            language: The language of the text (optional)
+            output_path: Path to save the audio file (optional)
+            **kwargs: Additional arguments for model generation
+            
+        Returns:
+            SynthesisResult: The synthesis result containing audio data and metadata
+            
+        Raises:
+            RuntimeError: If the model is not available or synthesis fails
+        """
+        if not await self._load_model():
+            raise RuntimeError(f"AI4Bharat model {self.model_id} is not available")
+
+        start_time = time.time()
+
+        try:
+            # Get voice description
+            voice_key = str(voice).lower() if voice else "default_female"
+            description_text = self.SPEAKER_DESCRIPTIONS.get(
+                voice_key,
+                self.SPEAKER_DESCRIPTIONS["default_female"]
+            )
+            logger.info(f"Using description for voice '{voice}': {description_text}")
+
+            # Prepare inputs
+            prompt_input_ids = self.tokenizer(text, return_tensors="pt").to(self.device)
+            description_input_ids = self.description_tokenizer(description_text, return_tensors="pt").to(self.device)
+
+            # Generate audio
+            with torch.no_grad():
+                generation = self.model.generate(
+                    input_ids=description_input_ids.input_ids,
+                    attention_mask=description_input_ids.attention_mask,
+                    prompt_input_ids=prompt_input_ids.input_ids,
+                    prompt_attention_mask=prompt_input_ids.attention_mask,
+                    **kwargs
+                ).cpu()
+
+            audio_array = generation.squeeze().numpy()
+            processing_time = time.time() - start_time
+            duration = len(audio_array) / self.sampling_rate
+
+            # Save audio if output path is provided
+            saved_path = None
+            if output_path:
+                try:
+                    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+                    sf.write(output_path, audio_array, self.sampling_rate)
+                    saved_path = output_path
+                    logger.info(f"Audio saved to: {output_path}")
+                except Exception as e:
+                    logger.error(f"Failed to save audio to {output_path}: {e}")
+
+            # Update cost tracking
+            cost = update_cost_tracker(self.name, "tts", characters=len(text))
+
+            return SynthesisResult(
+                audio_path=saved_path,
+                audio_data=audio_array if not saved_path else None,
+                sample_rate=self.sampling_rate,
+                duration=duration,
+                provider=self.name,
+                processing_time=processing_time
+            )
+
+        except Exception as e:
+            logger.error(f"AI4Bharat TTS synthesis error: {e}")
+            raise RuntimeError(f"AI4Bharat synthesis failed: {str(e)}")
 
 class TTSEngine(BaseEngine):
     """Production-grade TTS engine with multiple provider support"""
@@ -1574,6 +1865,14 @@ class TTSEngine(BaseEngine):
         self.providers = providers or []
         self.executor = None
         self.cache_enabled = True
+        
+        # Map providers to their supported languages
+        self.provider_language_map = {
+            "ai4bharat_indic-parler-tts": {"hi", "bn", "as", "doi", "mr", "ta", "te", "kn", "ml", "gu"},
+            "coqui_tacotron2-DDC": {"en"},
+            "coqui_vits": {"en"},
+            "coqui_tacotron2-DCA": {"de"}
+        }
     
     def initialize(self):
         """Initialize resources"""
@@ -1582,6 +1881,7 @@ class TTSEngine(BaseEngine):
         # Verify provider availability
         available_providers = []
         for provider in self.providers:
+            # Use sync check for now; async check will be used in health check
             if provider.is_available():
                 available_providers.append(provider)
             else:
@@ -1594,7 +1894,7 @@ class TTSEngine(BaseEngine):
             raise RuntimeError("No TTS providers are available")
         
         logger.info(f"TTS Engine initialized with providers: {[p.name for p in self.providers]}")
-    
+        
     def shutdown(self):
         """Release resources"""
         if self.executor:
@@ -1604,124 +1904,123 @@ class TTSEngine(BaseEngine):
         """Add a new provider to the engine"""
         if provider.is_available():
             self.providers.append(provider)
-            logger.info(f"Added provider: {provider.name}")
+            logger.info(f"Added TTS provider: {provider.name}")
         else:
             logger.warning(f"Provider {provider.name} is not available and will not be added")
     
-    def synthesize(self, 
-                  text: str,
-                  voice: Optional[str] = None,
-                  language: Optional[str] = None,
-                  output_path: Optional[str] = None,
-                  use_cache: bool = True,
-                  provider_name: Optional[str] = None,
-                  fallback: bool = True,
-                  **kwargs) -> SynthesisResult:
+    def _get_provider_for_language(self, language: Optional[str]) -> Optional[TTSProvider]:
+        """Get the best provider for the given language"""
+        if not language:
+            return self.providers[0] if self.providers else None
+            
+        for provider in self.providers:
+            if language in self.provider_language_map.get(provider.name, set()):
+                return provider
+        return None
+    
+    async def synthesize(self, 
+                        text: str,
+                        voice: Optional[str] = None,
+                        language: Optional[str] = None,
+                        output_path: Optional[str] = None,
+                        use_cache: bool = True,
+                        provider_name: Optional[str] = None,
+                        fallback: bool = True,
+                        **kwargs) -> SynthesisResult:
         """
-        Synthesize text with specified provider or use fallback strategy
+        Synthesize speech from text using the best available provider.
         
         Args:
-            text: Text to synthesize
-            voice: Voice ID
-            language: Language code
-            output_path: Path to save the generated audio file
-            use_cache: Whether to use Redis cache
+            text: The text to synthesize
+            voice: The voice to use
+            language: The language of the text
+            output_path: Path to save the audio file
+            use_cache: Whether to use cached results
             provider_name: Specific provider to use
-            fallback: Whether to try other providers if the specified one fails
-            **kwargs: Additional parameters
+            fallback: Whether to fall back to other providers if the preferred one fails
+            **kwargs: Additional arguments for model generation
             
         Returns:
-            SynthesisResult object
+            SynthesisResult: The synthesis result
+            
+        Raises:
+            RuntimeError: If no provider is available or synthesis fails
         """
-        # Generate cache key based on input parameters
-        cache_key = None
-        if use_cache and self.cache_enabled and output_path:
-            import hashlib
-            
-            # Create hash from text and parameters
-            param_str = json.dumps({
-                "text": text,
-                "voice": voice,
-                "language": language,
-                "provider": provider_name,
-                **kwargs
-            }, sort_keys=True)
-            param_hash = hashlib.md5(param_str.encode()).hexdigest()
-            cache_key = f"tts:{param_hash}"
-            
-            # Check cache
-            cached_path = redis_client.get(cache_key)
-            if cached_path and os.path.exists(cached_path):
-                logger.info(f"Cache hit for {cache_key}")
-                
-                # Copy from cache to requested output path if different
-                if cached_path != output_path:
-                    import shutil
-                    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-                    shutil.copy2(cached_path, output_path)
-                
-                # Get audio info
-                audio_info = sf.info(cached_path)
-                
-                return SynthesisResult(
-                    audio_path=output_path,
-                    audio_data=None,
-                    sample_rate=audio_info.samplerate,
-                    duration=audio_info.duration,
-                    provider="cache",
-                    processing_time=0.0
-                )
-        
-        # Select providers
-        selected_providers = []
+        if not self.providers:
+            raise RuntimeError("No TTS providers are available")
+
+        # Try to get the requested provider
+        provider = None
         if provider_name:
-            # Find the specific provider
-            for provider in self.providers:
-                if provider.name == provider_name:
-                    selected_providers.append(provider)
-                    break
-            
-            if not selected_providers and fallback:
-                # If specified provider not found and fallback is enabled
-                selected_providers = self.providers
-            elif not selected_providers:
-                raise ValueError(f"Provider {provider_name} not found or not available")
-        else:
-            # Use all providers
-            selected_providers = self.providers
-        
-        # Try providers in order
-        last_error = None
-        for provider in selected_providers:
-            try:
-                result = provider.synthesize(
-                    text=text,
-                    voice=voice,
-                    language=language,
-                    output_path=output_path,
-                    **kwargs
-                )
-                
-                # Cache result
-                if cache_key and result.audio_path:
+            provider = next((p for p in self.providers if p.name == provider_name), None)
+            if not provider:
+                raise RuntimeError(f"Requested provider {provider_name} is not available")
+
+        # If no specific provider requested, try to find one for the language
+        if not provider and language:
+            provider = self._get_provider_for_language(language)
+
+        # If still no provider, use the first available one
+        if not provider:
+            provider = self.providers[0]
+
+        try:
+            # Check cache if enabled
+            if use_cache and self.cache_enabled:
+                cache_key = f"tts:{provider.name}:{hashlib.md5(text.encode()).hexdigest()}"
+                cached_result = redis_client.get(cache_key)
+                if cached_result:
+                    try:
+                        result_dict = json.loads(cached_result)
+                        return SynthesisResult(**result_dict)
+                    except Exception as e:
+                        logger.warning(f"Failed to load cached result: {e}")
+
+            # Perform synthesis
+            result = await provider.synthesize(
+                text=text,
+                voice=voice,
+                language=language,
+                output_path=output_path,
+                **kwargs
+            )
+
+            # Cache the result if enabled
+            if use_cache and self.cache_enabled:
+                try:
+                    result_dict = asdict(result)
                     redis_client.setex(
                         cache_key,
                         CACHE_TTL,
-                        result.audio_path
+                        json.dumps(result_dict)
                     )
-                
-                return result
+                except Exception as e:
+                    logger.warning(f"Failed to cache result: {e}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Synthesis failed with provider {provider.name}: {e}")
             
-            except Exception as e:
-                logger.warning(f"Provider {provider.name} failed: {str(e)}")
-                last_error = e
-        
-        # If all providers failed
-        if last_error:
-            logger.error(f"All providers failed to synthesize: {str(last_error)}")
-            raise RuntimeError(f"Speech synthesis failed with all providers: {str(last_error)}")
-        
-        raise RuntimeError("No providers available for speech synthesis")
+            if fallback and len(self.providers) > 1:
+                # Try other providers
+                for fallback_provider in self.providers:
+                    if fallback_provider != provider:
+                        try:
+                            logger.info(f"Trying fallback provider: {fallback_provider.name}")
+                            result = await fallback_provider.synthesize(
+                                text=text,
+                                voice=voice,
+                                language=language,
+                                output_path=output_path,
+                                **kwargs
+                            )
+                            return result
+                        except Exception as fallback_error:
+                            logger.error(f"Fallback provider {fallback_provider.name} failed: {fallback_error}")
+                            continue
+            
+            raise RuntimeError(f"All TTS providers failed: {str(e)}")
 
 
 # --- REST API Implementation ---
@@ -1778,11 +2077,39 @@ stt_engine = STTEngine([
     WhisperProvider(model_name="base")
 ])
 
-tts_engine = TTSEngine([
-    CoquiTTSProvider(model_name="tts_models/en/ljspeech/tacotron2-DDC"),
-    CoquiTTSProvider(model_name="tts_models/en/vctk/vits"),
-    CoquiTTSProvider(model_name="tts_models/de/thorsten/tacotron2-DCA")
-])
+# Create TTS engine with available providers
+tts_providers = []
+
+# Add AI4Bharat provider if parler-tts is available
+if PARLER_TTS_AVAILABLE:
+    try:
+        ai4b_provider = AI4BharatTTSProvider(
+            model_id="ai4bharat/indic-parler-tts",
+            device="cuda" if torch.cuda.is_available() else "cpu"
+        )
+        tts_providers.append(ai4b_provider)
+        logger.info("Added AI4Bharat TTS provider")
+    except Exception as e:
+        logger.warning(f"Failed to initialize AI4Bharat TTS provider: {e}")
+
+# Add Coqui providers
+try:
+    coqui_providers = [
+        CoquiTTSProvider(model_name="tts_models/en/ljspeech/tacotron2-DDC"),
+        CoquiTTSProvider(model_name="tts_models/en/vctk/vits"),
+        CoquiTTSProvider(model_name="tts_models/de/thorsten/tacotron2-DCA")
+    ]
+    tts_providers.extend(coqui_providers)
+    logger.info("Added Coqui TTS providers")
+except Exception as e:
+    logger.warning(f"Failed to initialize Coqui TTS providers: {e}")
+
+# Ensure we have at least one TTS provider
+if not tts_providers:
+    logger.error("No TTS providers available")
+    raise RuntimeError("No TTS providers available")
+
+tts_engine = TTSEngine(tts_providers)
 
 # Initialize engines on startup
 @app.on_event("startup")
@@ -1863,15 +2190,18 @@ async def transcribe_audio(
             provider_name=request.provider,
             fallback=request.fallback
         )
+        
         # Language detection logic
         detected_lang = None
         try:
             detected_lang = detect(result.text)
         except LangDetectException:
             detected_lang = None
+            
         # Fallback to Anthropic LLM if detection failed
         if not detected_lang:
             detected_lang = detect_language_llm(result.text)
+            
         # If user provided language, check for mismatch
         if request.language:
             if detected_lang and detected_lang != request.language:
@@ -1891,9 +2221,12 @@ async def transcribe_audio(
                 background_tasks.add_task(lambda: os.rmdir(temp_dir))
                 raise HTTPException(status_code=400, detail="Could not detect language.")
             language_out = detected_lang
+            
+        # Clean up temporary files
         background_tasks.add_task(lambda: os.remove(temp_file_path))
         background_tasks.add_task(lambda: os.remove(converted_path))
         background_tasks.add_task(lambda: os.rmdir(temp_dir))
+        
         return TranscriptionResponse(
             id=request_id,
             text=result.text,
@@ -1976,13 +2309,53 @@ async def get_audio(audio_id: str):
 # Health check endpoint
 @app.get("/health")
 async def health_check():
+    async def check_provider(provider):
+        # Use async_is_available if available, else fallback to sync
+        if hasattr(provider, "async_is_available"):
+            try:
+                return provider.name if await provider.async_is_available() else None
+            except Exception as e:
+                logger.warning(f"Provider {provider.name} async check failed: {e}")
+                return None
+        else:
+            try:
+                return provider.name if provider.is_available() else None
+            except Exception as e:
+                logger.warning(f"Provider {provider.name} sync check failed: {e}")
+                return None
+
+    stt_names = [name for name in await asyncio.gather(*[check_provider(p) for p in stt_engine.providers]) if name]
+    tts_names = [name for name in await asyncio.gather(*[check_provider(p) for p in tts_engine.providers]) if name]
+
     health = {
         "status": "ok",
-        "stt_providers": [p.name for p in stt_engine.providers if p.is_available()],
-        "tts_providers": [p.name for p in tts_engine.providers if p.is_available()]
+        "stt_providers": stt_names,
+        "tts_providers": tts_names
     }
     return JSONResponse(content=health)
 
+# --- New endpoint: Get available AI4Bharat speakers ---
+@app.get("/api/ai4b_speakers")
+def get_ai4b_speakers():
+    # Find the AI4BharatTTSProvider in tts_engine
+    ai4b_provider = None
+    for provider in tts_engine.providers:
+        if hasattr(provider, '__class__') and provider.__class__.__name__ == "AI4BharatTTSProvider":
+            ai4b_provider = provider
+            break
+    
+    if ai4b_provider is None:
+        return JSONResponse(
+            content={"error": "AI4BharatTTSProvider not available"}, 
+            status_code=404
+        )
+    
+    # Return the speaker keys and descriptions
+    speakers = [
+        {"key": k, "description": v}
+        for k, v in getattr(ai4b_provider, "SPEAKER_DESCRIPTIONS", {}).items()
+    ]
+    return JSONResponse(content=speakers)
 
 # --- Example Usage ---
 
@@ -2017,6 +2390,37 @@ def main():
         stt.shutdown()
         tts.shutdown()
 
+# Initialize WebSocket service
+websocket_service = WebSocketAudioStreamingService(
+    stt_engine=stt_engine, 
+    tts_engine=tts_engine,
+    redis_client=redis_client
+)
+
+# WebSocket endpoint
+@app.websocket("/ws/audio/{session_id}")
+async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
+    """WebSocket endpoint for full-duplex audio streaming."""
+    await websocket.accept()
+    
+    # Extract parameters from query string
+    user_id = websocket.query_params.get("user_id")
+    language = websocket.query_params.get("language", "en")
+    
+    if not user_id:
+        await websocket.close(code=1008, reason="Missing user_id parameter")
+        return
+    
+    # Handle WebSocket connection
+    await websocket_service.handle_websocket_connection(websocket, f"/ws/audio/{session_id}?user_id={user_id}&language={language}")
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+async def serve_websocket_client():
+    """Serve the WebSocket client HTML page."""
+    return FileResponse("static/websocket_client.html")
 
 if __name__ == "__main__":
     import uvicorn
